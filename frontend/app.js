@@ -180,7 +180,6 @@ async function loadInitial() {
     calls.push(authFetch(`${API}/api/downtime-logs`));
     calls.push(authFetch(`${API}/api/downtime-logs/stats`));
     calls.push(authFetch(`${API}/api/scheduled-reports`));
-    calls.push(authFetch(`${API}/api/dashboard-views`));
     calls.push(authFetch(`${API}/api/device-groups`));
     calls.push(authFetch(`${API}/api/batches`));
     calls.push(authFetch(`${API}/api/ai-insights`));
