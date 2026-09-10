@@ -2681,6 +2681,7 @@ app.delete("/api/shift-templates/:id", requireRole("manager"), ah(async (req, re
 }));
 
 // --- WebSocket section ---
+const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 function broadcast(msg) {
