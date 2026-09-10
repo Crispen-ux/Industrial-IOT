@@ -123,6 +123,11 @@ async function authFetch(url, opts = {}) {
   return res;
 }
 
+function authHeaders() {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function login(username, password, twoFactorCode) {
   const res = await fetch(`${API}/api/auth/login`, {
     method: "POST",
@@ -5182,14 +5187,14 @@ function viewAssetTypes() {
 async function showCreateAssetType() {
   const name = prompt("Asset type name:");
   if (!name) return;
-  await fetch(`${API}/api/asset-types`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  await authFetch(`${API}/api/asset-types`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
   await loadAssetTypes();
   render();
 }
 
 async function deleteAssetType(id) {
   if (!confirm("Delete this asset type?")) return;
-  await fetch(`${API}/api/asset-types/${id}`, { method: "DELETE", headers: authHeaders() });
+  await authFetch(`${API}/api/asset-types/${id}`, { method: "DELETE" });
   await loadAssetTypes();
   render();
 }
