@@ -216,6 +216,7 @@ async function loadInitial() {
   maintenanceFailures = await results[i++].json();
   calibrationRecords = await results[i++].json();
   deviceHealthScores = await results[i++].json();
+  if (!Array.isArray(deviceHealthScores)) deviceHealthScores = [];
   dashboardViews = await results[i++].json();
   branding = await results[i++].json();
   if (dashboardViews.length && !currentDashboardViewId) {

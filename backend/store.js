@@ -814,12 +814,13 @@ const store = {
     for (const d of devices) {
       // Factor 1: Reading stability (last 20 readings within tolerance?)
       const { rows: readings } = await db.query(
-        "SELECT target_weight, actual_weight FROM readings WHERE device_id = $1 ORDER BY ts DESC LIMIT 20",
+        "SELECT weight, target_weight FROM readings WHERE device_id = $1 ORDER BY ts DESC LIMIT 20",
         [d.id]
       );
       let readingScore = 100;
       if (readings.length > 0) {
-        const withinTolerance = readings.filter(r => Math.abs(r.actual_weight - r.target_weight) <= (d.tolerance || 5)).length;
+        const target = d.target || 25;
+        const withinTolerance = readings.filter(r => Math.abs((r.weight || 0) - target) <= (d.tolerance || 5)).length;
         readingScore = Math.round((withinTolerance / readings.length) * 100);
       } else {
         readingScore = 50; // no data = unknown
