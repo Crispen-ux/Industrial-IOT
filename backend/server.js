@@ -224,6 +224,12 @@ app.get("/api/auth/me", requireUserMw, ah(async (req, res) => {
   res.json(req.user);
 }));
 
+app.post("/api/auth/revoke-sessions", requireUserMw, ah(async (req, res) => {
+  await db.query("DELETE FROM user_sessions WHERE user_id = $1", [req.user.id]);
+  audit(req, "sessions_revoked", {});
+  res.json({ ok: true, message: "All other sessions revoked" });
+}));
+
 // ---------- User management (admin only) ----------
 
 app.get("/api/users", requireRole("admin"), ah(async (req, res) => {
@@ -771,6 +777,153 @@ app.delete("/api/maintenance/:id", requireRole("manager"), ah(async (req, res) =
   res.status(204).end();
 }));
 
+// --- Maintenance Schedules (preventive) ---
+app.get("/api/maintenance-schedules", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listMaintenanceSchedules({ deviceId: req.query.deviceId, orgId: req.user.orgId }));
+}));
+
+app.post("/api/maintenance-schedules", requireRole("manager"), ah(async (req, res) => {
+  const schedule = await store.createMaintenanceSchedule({ ...req.body, orgId: req.user.orgId });
+  audit(req, "maintenance_schedule_create", { scheduleId: schedule.id });
+  res.status(201).json(schedule);
+}));
+
+app.put("/api/maintenance-schedules/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.updateMaintenanceSchedule(req.params.id, req.body);
+  audit(req, "maintenance_schedule_update", { scheduleId: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.delete("/api/maintenance-schedules/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteMaintenanceSchedule(req.params.id);
+  audit(req, "maintenance_schedule_delete", { scheduleId: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.post("/api/maintenance-schedules/generate", requireRole("manager"), ah(async (req, res) => {
+  const generated = await store.generateMaintenanceFromSchedules();
+  audit(req, "maintenance_schedules_generate", { count: generated.length });
+  res.json({ generated: generated.length, records: generated });
+}));
+
+// --- Maintenance Failures ---
+app.get("/api/maintenance-failures", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listMaintenanceFailures({ deviceId: req.query.deviceId }));
+}));
+
+app.post("/api/maintenance-failures", requireRole("manager"), ah(async (req, res) => {
+  const failure = await store.addMaintenanceFailure(req.body);
+  audit(req, "maintenance_failure_add", { failureId: failure.id, deviceId: failure.deviceId });
+  res.status(201).json(failure);
+}));
+
+app.put("/api/maintenance-failures/:id/resolve", requireRole("manager"), ah(async (req, res) => {
+  await store.resolveMaintenanceFailure(req.params.id, req.body.resolution);
+  audit(req, "maintenance_failure_resolve", { failureId: req.params.id });
+  res.json({ ok: true });
+}));
+
+// --- MTBF & Prediction ---
+app.get("/api/devices/:id/mtbf", requireUserMw, ah(async (req, res) => {
+  res.json(await store.calculateMTBF(req.params.id));
+}));
+
+app.get("/api/devices/:id/failure-prediction", requireUserMw, ah(async (req, res) => {
+  res.json(await store.predictNextFailure(req.params.id));
+}));
+
+// --- Maintenance Cost Analytics ---
+app.get("/api/maintenance-costs", requireUserMw, ah(async (req, res) => {
+  res.json(await store.getMaintenanceCosts(req.query.deviceId, req.query.from, req.query.to));
+}));
+
+// ============================================================
+// PHASE 6: Predictive Maintenance — Health Trends, RUL, Optimization
+// ============================================================
+
+// --- Health History ---
+app.get("/api/devices/:id/health-history", requireUserMw, ah(async (req, res) => {
+  res.json(await store.getHealthHistory(req.params.id, Number(req.query.days) || 30));
+}));
+
+app.post("/api/devices/:id/health-history", requireRole("manager"), ah(async (req, res) => {
+  const id = await store.recordHealthScore(req.params.id, req.body);
+  res.status(201).json({ id });
+}));
+
+app.post("/api/health-history/record-all", requireRole("manager"), ah(async (req, res) => {
+  const recorded = await store.recordAllDeviceHealthScores();
+  audit(req, "health_history_record_all", { count: recorded.length });
+  res.json({ recorded: recorded.length, devices: recorded });
+}));
+
+// --- Health Trend Analysis ---
+app.get("/api/devices/:id/health-trend", requireUserMw, ah(async (req, res) => {
+  res.json(await store.analyzeHealthTrend(req.params.id, Number(req.query.days) || 30));
+}));
+
+// --- RUL Estimation ---
+app.get("/api/devices/:id/rul", requireUserMw, ah(async (req, res) => {
+  res.json(await store.estimateRUL(req.params.id, { failureThreshold: Number(req.query.threshold) || 50 }));
+}));
+
+// --- Maintenance Recommendations ---
+app.get("/api/devices/:id/maintenance-recommendations", requireUserMw, ah(async (req, res) => {
+  const recs = await store.generateMaintenanceRecommendations(req.params.id);
+  res.json(recs);
+}));
+
+// --- Failure Mode Analysis ---
+app.get("/api/devices/:id/failure-analysis", requireUserMw, ah(async (req, res) => {
+  res.json(await store.analyzeFailureModes(req.params.id));
+}));
+
+// --- Cost Optimization Analysis ---
+app.get("/api/devices/:id/cost-analysis", requireUserMw, ah(async (req, res) => {
+  res.json(await store.analyzeMaintenanceCosts(req.params.id));
+}));
+
+// ============================================================
+// PHASE 8: System Health & Monitoring
+// ============================================================
+
+app.get("/api/health", requireUserMw, ah(async (req, res) => {
+  const memUsage = process.memoryUsage();
+  const uptime = process.uptime();
+  let dbStatus = "disconnected", poolTotal = 0, poolIdle = 0;
+  try {
+    const { rows } = await db.query("SELECT 1");
+    dbStatus = "connected";
+    const pool = db.pool;
+    if (pool) { poolTotal = pool.totalCount; poolIdle = pool.idleCount; }
+  } catch (e) { dbStatus = "error: " + e.message; }
+
+  const deviceCount = (await store.listDevices()).length;
+  const userCount = (await db.query("SELECT COUNT(*) as c FROM users")).rows[0]?.c || 0;
+  const readingsToday = (await db.query("SELECT COUNT(*) as c FROM readings WHERE ts > now() - interval '1 day'")).rows[0]?.c || 0;
+  const activeAlertsCount = store.listActiveAlerts().length;
+
+  res.json({
+    status: "ok",
+    database: dbStatus,
+    poolTotal,
+    poolIdle,
+    uptime,
+    memoryUsed: `${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`,
+    memoryTotal: `${Math.round(memUsage.heapTotal / 1024 / 1024)}MB`,
+    nodeVersion: process.version,
+    deviceCount,
+    userCount,
+    readingsToday,
+    activeAlerts: activeAlertsCount,
+    timestamp: new Date().toISOString(),
+  });
+}));
+
+app.get("/api/health/ping", (req, res) => {
+  res.json({ pong: true, timestamp: Date.now() });
+});
+
 // ---------- Calibration management ----------
 
 app.get("/api/calibrations", requireUserMw, ah(async (req, res) => {
@@ -1114,39 +1267,54 @@ app.get("/api/devices/:id/oee", requireUserMw, ah(async (req, res) => {
   const toDate = to ? new Date(to) : new Date();
   const plannedSeconds = (toDate.getTime() - fromDate.getTime()) / 1000;
 
-  // Downtime from logs
+  // Downtime from logs + production events
   const downtimeLogs = await store.listDowntimeLogs({ deviceId, from: fromDate.toISOString(), to: toDate.toISOString() });
   const downtimeSeconds = downtimeLogs.reduce((sum, log) => {
     const end = log.endedAt ? new Date(log.endedAt).getTime() : Date.now();
     return sum + (end - new Date(log.startedAt).getTime()) / 1000;
   }, 0);
 
-  // Readings in range
-  const readings = await store.getReadingsRange(deviceId, fromDate.toISOString(), toDate.toISOString());
-  const operatingSeconds = Math.max(plannedSeconds - downtimeSeconds, 0);
+  // Also include production events downtime
+  const prodEvents = await store.listProductionEvents({ deviceId });
+  const eventDowntime = prodEvents.filter(e => ["downtime", "changeover", "breakdown", "maintenance"].includes(e.eventType) && e.startTime && e.endTime).reduce((sum, e) => {
+    return sum + (new Date(e.endTime).getTime() - new Date(e.startTime).getTime()) / 1000;
+  }, 0);
+  const totalDowntime = downtimeSeconds + eventDowntime;
 
-  // Bag stats
-  const stats = await store.getBagStats(deviceId);
-  const totalBags = stats.totalBags || 0;
-  const goodBags = stats.countPass || 0;
-  const overBags = stats.countOver || 0;
-  const underBags = stats.countUnder || 0;
+  // Operating time
+  const operatingSeconds = Math.max(plannedSeconds - totalDowntime, 0);
+
+  // Use production order data if available, else fall back to readings/bag stats
+  const activeOrders = (await store.listProductionOrders({ deviceId })).filter(o => ["in_progress", "completed"].includes(o.status));
+  const hasOrders = activeOrders.length > 0;
+
+  let totalUnits, goodUnits, rejectUnits;
+  if (hasOrders) {
+    totalUnits = activeOrders.reduce((s, o) => s + (o.actualQuantity || 0), 0);
+    goodUnits = activeOrders.reduce((s, o) => s + (o.goodQuantity || 0), 0);
+    rejectUnits = activeOrders.reduce((s, o) => s + (o.rejectQuantity || 0), 0);
+  } else {
+    // Fallback to readings-based stats
+    const stats = await store.getBagStats(deviceId);
+    totalUnits = stats.totalBags || 0;
+    goodUnits = stats.countPass || 0;
+    rejectUnits = (stats.countOver || 0) + (stats.countUnder || 0);
+  }
 
   // OEE calculation
-  const availability = plannedSeconds > 0 ? ((plannedSeconds - downtimeSeconds) / plannedSeconds) * 100 : 0;
-  // Performance: based on actual readings vs theoretical max
+  const availability = plannedSeconds > 0 ? ((plannedSeconds - totalDowntime) / plannedSeconds) * 100 : 0;
   const idealCycleMs = device.pollingMs || 500;
-  const theoreticalBags = operatingSeconds * 1000 / idealCycleMs;
-  const performance = theoreticalBags > 0 ? Math.min((totalBags / theoreticalBags) * 100, 100) : 0;
-  // Quality
-  const quality = totalBags > 0 ? (goodBags / totalBags) * 100 : 0;
+  const theoreticalUnits = operatingSeconds * 1000 / idealCycleMs;
+  const performance = theoreticalUnits > 0 ? Math.min((totalUnits / theoreticalUnits) * 100, 100) : 0;
+  const quality = totalUnits > 0 ? (goodUnits / totalUnits) * 100 : 0;
   const oee = (availability * performance * quality) / 10000;
 
   res.json({
-    deviceId, deviceName: device.name,
+    deviceId, deviceName: device.name, hasOrders,
     from: fromDate.toISOString(), to: toDate.toISOString(),
-    plannedSeconds, operatingSeconds, downtimeSeconds,
-    totalBags, goodBags, overBags, underBags,
+    plannedSeconds, operatingSeconds, downtimeSeconds: totalDowntime,
+    totalUnits, goodUnits, rejectUnits,
+    totalBags: totalUnits, goodBags: goodUnits, overBags: rejectUnits, underBags: 0,
     availability: Math.round(availability * 10) / 10,
     performance: Math.round(performance * 10) / 10,
     quality: Math.round(quality * 10) / 10,
@@ -1576,6 +1744,74 @@ app.put("/api/ai-insights/:id/acknowledge", requireRole("operator"), ah(async (r
   res.json({ ok: true });
 }));
 
+// ============================================================
+// PHASE 5: Machine Learning Pipeline — Models, Anomaly, Drift, Forecast
+// ============================================================
+
+// --- ML Model Management ---
+app.get("/api/ml-models", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listMLModels({ deviceId: req.query.deviceId, modelType: req.query.modelType, orgId: req.user.orgId }));
+}));
+
+app.get("/api/ml-models/:id", requireUserMw, ah(async (req, res) => {
+  const model = await store.getMLModel(req.params.id);
+  if (!model) return res.status(404).json({ error: "model not found" });
+  res.json(model);
+}));
+
+app.post("/api/ml-models", requireRole("manager"), ah(async (req, res) => {
+  const model = await store.createMLModel({ ...req.body, orgId: req.user.orgId });
+  audit(req, "ml_model_create", { modelId: model.id });
+  res.status(201).json(model);
+}));
+
+app.delete("/api/ml-models/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteMLModel(req.params.id);
+  audit(req, "ml_model_delete", { modelId: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.post("/api/ml-models/:id/train", requireRole("manager"), ah(async (req, res) => {
+  const result = await store.trainMLModel(req.params.id);
+  if (result?.error) return res.status(400).json(result);
+  audit(req, "ml_model_train", { modelId: req.params.id });
+  res.json(result);
+}));
+
+app.post("/api/ml-models/:id/predict", requireRole("manager"), ah(async (req, res) => {
+  const { horizonHours } = req.body;
+  const prediction = await store.generateMLPrediction(req.params.id, horizonHours);
+  if (prediction?.error) return res.status(400).json(prediction);
+  audit(req, "ml_model_predict", { modelId: req.params.id });
+  res.json(prediction);
+}));
+
+// --- ML Predictions ---
+app.get("/api/ml-predictions", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listMLPredictions({ modelId: req.query.modelId, deviceId: req.query.deviceId }));
+}));
+
+// --- Anomaly Detection ---
+app.get("/api/devices/:id/anomalies", requireUserMw, ah(async (req, res) => {
+  const { metric, threshold, minSamples } = req.query;
+  if (!metric) return res.status(400).json({ error: "metric query param required" });
+  res.json(await store.detectAnomalies(req.params.id, metric, { threshold: Number(threshold) || 3, minSamples: Number(minSamples) || 20 }));
+}));
+
+// --- Drift Detection ---
+app.get("/api/devices/:id/drift", requireUserMw, ah(async (req, res) => {
+  const { metric, cusumThreshold, ewmaAlpha, windowSize } = req.query;
+  if (!metric) return res.status(400).json({ error: "metric query param required" });
+  res.json(await store.detectDrift(req.params.id, metric, { cusumThreshold: Number(cusumThreshold) || 5, ewmaAlpha: Number(ewmaAlpha) || 0.2, windowSize: Number(windowSize) || 50 }));
+}));
+
+// --- Time-Series Forecasting ---
+app.get("/api/devices/:id/forecast", requireUserMw, ah(async (req, res) => {
+  const { metric, horizonHours, windowSize } = req.query;
+  if (!metric) return res.status(400).json({ error: "metric query param required" });
+  res.json(await store.forecastMetric(req.params.id, metric, { horizonHours: Number(horizonHours) || 24, windowSize: Number(windowSize) || 100 }));
+}));
+
 // ---------- Organizations (Multi-Tenancy) ----------
 app.get("/api/organizations", requireRole("admin"), ah(async (req, res) => {
   res.json(await store.listOrganizations());
@@ -1698,6 +1934,155 @@ app.post("/api/integrations/:id/test", requireRole("admin"), ah(async (req, res)
 
 app.get("/api/integration-logs", requireRole("manager"), ah(async (req, res) => {
   res.json(await store.listIntegrationLogs(req.query.integrationId, parseInt(req.query.limit) || 50));
+}));
+
+// ============================================================
+// PHASE 7: Integrations + Enterprise — ERP/MES, Export, Webhooks
+// ============================================================
+
+// --- Integration Mappings ---
+app.get("/api/integration-mappings", requireRole("manager"), ah(async (req, res) => {
+  res.json(await store.listIntegrationMappings(req.query.integrationId));
+}));
+
+app.post("/api/integration-mappings", requireRole("admin"), ah(async (req, res) => {
+  const mapping = await store.createIntegrationMapping(req.body);
+  audit(req, "integration_mapping_create", { id: mapping.id });
+  res.status(201).json(mapping);
+}));
+
+app.put("/api/integration-mappings/:id", requireRole("admin"), ah(async (req, res) => {
+  await store.updateIntegrationMapping(req.params.id, req.body);
+  audit(req, "integration_mapping_update", { id: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.delete("/api/integration-mappings/:id", requireRole("admin"), ah(async (req, res) => {
+  await store.deleteIntegrationMapping(req.params.id);
+  audit(req, "integration_mapping_delete", { id: req.params.id });
+  res.json({ ok: true });
+}));
+
+// --- Webhook Configurations ---
+app.get("/api/webhook-configs", requireRole("manager"), ah(async (req, res) => {
+  res.json(await store.listWebhookConfigs(req.query.integrationId));
+}));
+
+app.post("/api/webhook-configs", requireRole("admin"), ah(async (req, res) => {
+  const config = await store.createWebhookConfig(req.body);
+  audit(req, "webhook_config_create", { id: config.id });
+  res.status(201).json(config);
+}));
+
+app.put("/api/webhook-configs/:id", requireRole("admin"), ah(async (req, res) => {
+  await store.updateWebhookConfig(req.params.id, req.body);
+  audit(req, "webhook_config_update", { id: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.delete("/api/webhook-configs/:id", requireRole("admin"), ah(async (req, res) => {
+  await store.deleteWebhookConfig(req.params.id);
+  audit(req, "webhook_config_delete", { id: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.post("/api/webhook-configs/:id/test", requireRole("admin"), ah(async (req, res) => {
+  const result = await store.fireWebhookWithRetry(req.params.id, "test", { test: true, timestamp: new Date().toISOString() });
+  audit(req, "webhook_test", { id: req.params.id, result: result.success });
+  res.json(result);
+}));
+
+// --- Data Export ---
+app.get("/api/export/jobs/:id", requireUserMw, ah(async (req, res) => {
+  const job = await store.getExportJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "Export job not found" });
+  res.json(job);
+}));
+
+app.post("/api/export", requireUserMw, ah(async (req, res) => {
+  const { exportType, format, filters } = req.body;
+  if (!exportType) return res.status(400).json({ error: "exportType required" });
+  const validTypes = ["readings", "telemetry", "alerts", "maintenance", "production", "devices"];
+  if (!validTypes.includes(exportType)) return res.status(400).json({ error: `exportType must be one of: ${validTypes.join(", ")}` });
+
+  const job = await store.createExportJob({ userId: req.user.id, exportType, format: format || "csv", filters: filters || {} });
+
+  // Generate export data
+  const { data, columns, count } = await store.generateExportData(exportType, filters || {});
+
+  if (format === "json") {
+    await store.updateExportJob(job.id, { status: "completed", recordCount: count, completedAt: new Date().toISOString() });
+    audit(req, "data_export", { type: exportType, format: "json", count });
+    res.json({ jobId: job.id, data, count });
+  } else {
+    const csv = await store.convertToCSV(data, columns);
+    const fileName = `export_${exportType}_${Date.now()}.csv`;
+    await store.updateExportJob(job.id, { status: "completed", recordCount: count, fileUrl: `/tmp/${fileName}`, fileSize: csv.length, completedAt: new Date().toISOString() });
+    audit(req, "data_export", { type: exportType, format: "csv", count });
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.send(csv);
+  }
+}));
+
+// --- Data Import ---
+app.get("/api/import/jobs/:id", requireUserMw, ah(async (req, res) => {
+  const job = await store.getImportJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "Import job not found" });
+  res.json(job);
+}));
+
+app.post("/api/import/validate", requireRole("manager"), ah(async (req, res) => {
+  const { importType, data } = req.body;
+  if (!importType || !data) return res.status(400).json({ error: "importType and data required" });
+  const validTypes = ["devices", "products", "telemetry"];
+  if (!validTypes.includes(importType)) return res.status(400).json({ error: `importType must be one of: ${validTypes.join(", ")}` });
+
+  const job = await store.createImportJob({ userId: req.user.id, importType, fileName: "api_upload" });
+  const validation = await store.validateImportData(importType, data);
+  await store.updateImportJob(job.id, { totalRows: validation.total, validRows: validation.valid, errorRows: validation.errors, errors: validation.validationErrors, status: "validated" });
+
+  audit(req, "data_import_validate", { type: importType, total: validation.total, valid: validation.valid, errors: validation.errors });
+  res.json({ jobId: job.id, ...validation });
+}));
+
+app.post("/api/import/execute", requireRole("manager"), ah(async (req, res) => {
+  const { jobId, data } = req.body;
+  if (!jobId || !data) return res.status(400).json({ error: "jobId and data required" });
+  const job = await store.getImportJob(jobId);
+  if (!job) return res.status(404).json({ error: "Import job not found" });
+
+  await store.updateImportJob(jobId, { status: "processing" });
+
+  let processed = 0, errors = 0;
+  const errorList = [];
+
+  for (let i = 0; i < data.length; i++) {
+    try {
+      if (job.importType === "devices") {
+        await store.addDevice({ name: data[i].name, protocol: data[i].protocol || "tcp", ip: data[i].ip, port: data[i].port });
+      } else if (job.importType === "products") {
+        await store.createProduct({ name: data[i].name, targetWeight: Number(data[i].targetWeight) || 25, toleranceType: data[i].toleranceType || "fixed", toleranceValue: Number(data[i].toleranceValue) || 5 });
+      } else if (job.importType === "telemetry") {
+        const deviceId = data[i].device_id || data[i].deviceId;
+        await store.pushTelemetry(deviceId, data[i].metric, Number(data[i].value), data[i].unit);
+      }
+      processed++;
+    } catch (e) {
+      errors++;
+      errorList.push({ row: i + 1, error: e.message });
+      if (errorList.length > 50) break;
+    }
+  }
+
+  await store.updateImportJob(jobId, { status: "completed", processedRows: processed, errorRows: errors, errors: errorList, result: { processed, errors }, completedAt: new Date().toISOString() });
+  audit(req, "data_import_execute", { type: job.importType, processed, errors });
+  res.json({ jobId, processed, errors, errors: errorList.slice(0, 20) });
+}));
+
+// --- API Discovery ---
+app.get("/api/discovery", requireUserMw, ah(async (req, res) => {
+  res.json(await store.getAPIDiscovery());
 }));
 
 // ---------- Push Notifications ----------
@@ -1891,9 +2276,411 @@ app.post("/api/readings", requireGatewayKey, ah(async (req, res) => {
   res.status(202).json({ ok: true });
 }));
 
-// ---------- Server + WebSocket ----------
+// ============================================================
+// PHASE 1: Platform Foundation — Hierarchy, Asset Types, Telemetry, Sensors
+// ============================================================
 
-const server = http.createServer(app);
+// --- Sites ---
+app.get("/api/sites", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listSites(req.query.orgId));
+}));
+
+app.post("/api/sites", requireRole("manager"), ah(async (req, res) => {
+  const { name, orgId, code, address, timezone, lat, lng } = req.body;
+  if (!name) return res.status(400).json({ error: "name is required" });
+  const site = await store.createSite({ name, orgId, code, address, timezone, lat, lng });
+  audit(req, "site_create", { siteId: site.id, name });
+  res.status(201).json(site);
+}));
+
+app.put("/api/sites/:id", requireRole("manager"), ah(async (req, res) => {
+  const site = await store.getSite(req.params.id);
+  if (!site) return res.status(404).json({ error: "site not found" });
+  const updated = await store.updateSite(req.params.id, req.body);
+  audit(req, "site_update", { siteId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/sites/:id", requireRole("admin"), ah(async (req, res) => {
+  await store.deleteSite(req.params.id);
+  audit(req, "site_delete", { siteId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Areas ---
+app.get("/api/areas", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listAreas(req.query.siteId));
+}));
+
+app.post("/api/areas", requireRole("manager"), ah(async (req, res) => {
+  const { siteId, name, code, description, color } = req.body;
+  if (!siteId || !name) return res.status(400).json({ error: "siteId and name are required" });
+  const area = await store.createArea({ siteId, name, code, description, color });
+  audit(req, "area_create", { areaId: area.id, name });
+  res.status(201).json(area);
+}));
+
+app.put("/api/areas/:id", requireRole("manager"), ah(async (req, res) => {
+  const area = await store.getArea(req.params.id);
+  if (!area) return res.status(404).json({ error: "area not found" });
+  const updated = await store.updateArea(req.params.id, req.body);
+  audit(req, "area_update", { areaId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/areas/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteArea(req.params.id);
+  audit(req, "area_delete", { areaId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Lines ---
+app.get("/api/lines", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listLines(req.query.areaId));
+}));
+
+app.post("/api/lines", requireRole("manager"), ah(async (req, res) => {
+  const { areaId, name, code, description, color } = req.body;
+  if (!areaId || !name) return res.status(400).json({ error: "areaId and name are required" });
+  const line = await store.createLine({ areaId, name, code, description, color });
+  audit(req, "line_create", { lineId: line.id, name });
+  res.status(201).json(line);
+}));
+
+app.put("/api/lines/:id", requireRole("manager"), ah(async (req, res) => {
+  const line = await store.getLine(req.params.id);
+  if (!line) return res.status(404).json({ error: "line not found" });
+  const updated = await store.updateLine(req.params.id, req.body);
+  audit(req, "line_update", { lineId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/lines/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteLine(req.params.id);
+  audit(req, "line_delete", { lineId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Stations ---
+app.get("/api/stations", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listStations(req.query.lineId));
+}));
+
+app.post("/api/stations", requireRole("manager"), ah(async (req, res) => {
+  const { lineId, name, code, description } = req.body;
+  if (!lineId || !name) return res.status(400).json({ error: "lineId and name are required" });
+  const station = await store.createStation({ lineId, name, code, description });
+  audit(req, "station_create", { stationId: station.id, name });
+  res.status(201).json(station);
+}));
+
+app.put("/api/stations/:id", requireRole("manager"), ah(async (req, res) => {
+  const station = await store.getStation(req.params.id);
+  if (!station) return res.status(404).json({ error: "station not found" });
+  const updated = await store.updateStation(req.params.id, req.body);
+  audit(req, "station_update", { stationId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/stations/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteStation(req.params.id);
+  audit(req, "station_delete", { stationId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Hierarchy Tree ---
+app.get("/api/hierarchy", requireUserMw, ah(async (req, res) => {
+  res.json(await store.getHierarchyTree(req.query.orgId));
+}));
+
+// --- Asset Types ---
+app.get("/api/asset-types", requireUserMw, ah(async (req, res) => {
+  const types = await store.listAssetTypes(req.query.orgId);
+  const result = [];
+  for (const t of types) {
+    const metrics = await store.listAssetTypeMetrics(t.id);
+    result.push({ ...t, metrics });
+  }
+  res.json(result);
+}));
+
+app.get("/api/asset-types/:id", requireUserMw, ah(async (req, res) => {
+  const type = await store.getAssetType(req.params.id);
+  if (!type) return res.status(404).json({ error: "asset type not found" });
+  const metrics = await store.listAssetTypeMetrics(type.id);
+  res.json({ ...type, metrics });
+}));
+
+app.post("/api/asset-types", requireRole("manager"), ah(async (req, res) => {
+  const { name, code, description, icon, color, category, orgId, metrics } = req.body;
+  if (!name) return res.status(400).json({ error: "name is required" });
+  const assetType = await store.createAssetType({ name, code, description, icon, color, category, orgId });
+  if (Array.isArray(metrics)) {
+    for (const m of metrics) {
+      await store.createAssetTypeMetric({ assetTypeId: assetType.id, ...m });
+    }
+  }
+  audit(req, "asset_type_create", { assetTypeId: assetType.id, name });
+  res.status(201).json(assetType);
+}));
+
+app.put("/api/asset-types/:id", requireRole("manager"), ah(async (req, res) => {
+  const type = await store.getAssetType(req.params.id);
+  if (!type) return res.status(404).json({ error: "asset type not found" });
+  const updated = await store.updateAssetType(req.params.id, req.body);
+  audit(req, "asset_type_update", { assetTypeId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/asset-types/:id", requireRole("admin"), ah(async (req, res) => {
+  const type = await store.getAssetType(req.params.id);
+  if (type?.isSystem) return res.status(400).json({ error: "cannot delete system asset types" });
+  await store.deleteAssetType(req.params.id);
+  audit(req, "asset_type_delete", { assetTypeId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Asset Type Metrics ---
+app.post("/api/asset-types/:id/metrics", requireRole("manager"), ah(async (req, res) => {
+  const type = await store.getAssetType(req.params.id);
+  if (!type) return res.status(404).json({ error: "asset type not found" });
+  const { name, displayName, unit, dataType, minValue, maxValue, precision, category } = req.body;
+  if (!name || !displayName) return res.status(400).json({ error: "name and displayName are required" });
+  const metric = await store.createAssetTypeMetric({ assetTypeId: req.params.id, name, displayName, unit, dataType, minValue, maxValue, precision, category });
+  audit(req, "asset_type_metric_create", { assetTypeId: req.params.id, name });
+  res.status(201).json(metric);
+}));
+
+app.delete("/api/asset-types/metrics/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteAssetTypeMetric(req.params.id);
+  audit(req, "asset_type_metric_delete", { metricId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Sensors ---
+app.get("/api/sensors", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listSensors(req.query.deviceId));
+}));
+
+app.get("/api/sensors/:id", requireUserMw, ah(async (req, res) => {
+  const sensor = await store.getSensor(req.params.id);
+  if (!sensor) return res.status(404).json({ error: "sensor not found" });
+  res.json(sensor);
+}));
+
+app.post("/api/sensors", requireRole("manager"), ah(async (req, res) => {
+  const { deviceId, name, type, unit, config, minValue, maxValue, warningMin, warningMax, alarmMin, alarmMax } = req.body;
+  if (!deviceId || !name || !type) return res.status(400).json({ error: "deviceId, name, and type are required" });
+  const sensor = await store.createSensor({ deviceId, name, type, unit, config, minValue, maxValue, warningMin, warningMax, alarmMin, alarmMax });
+  audit(req, "sensor_create", { sensorId: sensor.id, deviceId, name });
+  res.status(201).json(sensor);
+}));
+
+app.put("/api/sensors/:id", requireRole("manager"), ah(async (req, res) => {
+  const sensor = await store.getSensor(req.params.id);
+  if (!sensor) return res.status(404).json({ error: "sensor not found" });
+  const updated = await store.updateSensor(req.params.id, req.body);
+  audit(req, "sensor_update", { sensorId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/sensors/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteSensor(req.params.id);
+  audit(req, "sensor_delete", { sensorId: req.params.id });
+  res.status(204).end();
+}));
+
+// --- Generic Telemetry ---
+app.post("/api/telemetry", requireGatewayKey, ah(async (req, res) => {
+  const { deviceId, metrics, connected, quality } = req.body;
+  if (!deviceId || !metrics || typeof metrics !== "object") {
+    return res.status(400).json({ error: "deviceId and metrics (object) are required" });
+  }
+  await store.pushTelemetry(deviceId, metrics, connected, quality);
+  broadcast({ type: "telemetry", deviceId, metrics, connected, ts: Date.now() });
+
+  // Update asset status
+  const status = connected !== false ? "running" : "offline";
+  await store.updateAssetStatus(deviceId, status, connected !== false ? "Receiving data" : "No connection", metrics);
+  broadcast({ type: "asset_status", deviceId, status });
+
+  // Evaluate alert rules for each metric
+  for (const [metricName, metricValue] of Object.entries(metrics)) {
+    if (typeof metricValue === "number") {
+      try {
+        await store.evaluateRulesForDevice(deviceId, metricName, metricValue);
+      } catch (e) {
+        console.error(`[rules] evaluation error for ${deviceId}/${metricName}:`, e.message);
+      }
+    }
+  }
+
+  res.status(202).json({ ok: true });
+}));
+
+app.get("/api/telemetry/:deviceId", requireUserMw, ah(async (req, res) => {
+  const limit = Number(req.query.limit) || 100;
+  const metricName = req.query.metric || null;
+  res.json(await store.getTelemetry(req.params.deviceId, metricName, limit));
+}));
+
+app.get("/api/telemetry/:deviceId/range", requireUserMw, ah(async (req, res) => {
+  const { from, to, metric } = req.query;
+  if (!from || !to) return res.status(400).json({ error: "from and to query params are required" });
+  res.json(await store.getTelemetryInRange(req.params.deviceId, from, to, metric));
+}));
+
+app.get("/api/telemetry/:deviceId/latest", requireUserMw, ah(async (req, res) => {
+  const latest = await store.getLatestTelemetry(req.params.deviceId);
+  res.json(latest || { metrics: {}, connected: false, ts: null });
+}));
+
+// ============================================================
+// PHASE 2: Real-Time Operations — Alert Rules + Asset Status
+// ============================================================
+
+// --- Asset Status ---
+app.get("/api/asset-status", requireUserMw, ah(async (req, res) => {
+  if (req.query.deviceId) {
+    res.json(await store.getAssetStatus(req.query.deviceId));
+  } else {
+    res.json(await store.getAllAssetStatuses());
+  }
+}));
+
+// --- Alert Rules ---
+app.get("/api/alert-rules", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listAlertRules(req.query.orgId));
+}));
+
+app.get("/api/alert-rules/:id", requireUserMw, ah(async (req, res) => {
+  const rule = await store.getAlertRule(req.params.id);
+  if (!rule) return res.status(404).json({ error: "rule not found" });
+  res.json(rule);
+}));
+
+app.post("/api/alert-rules", requireRole("manager"), ah(async (req, res) => {
+  const { name, description, enabled, deviceId, deviceIds, metric, operator, threshold, severity, messageTemplate, cooldownSeconds, consecutiveCount, tags, orgId } = req.body;
+  if (!name || !metric || threshold === undefined) return res.status(400).json({ error: "name, metric, and threshold are required" });
+  const validOps = [">", ">=", "<", "<=", "==", "!="];
+  if (operator && !validOps.includes(operator)) return res.status(400).json({ error: `operator must be one of ${validOps.join(", ")}` });
+  const rule = await store.createAlertRule({ name, description, enabled, deviceId, deviceIds, metric, operator, threshold, severity, messageTemplate, cooldownSeconds, consecutiveCount, tags, orgId });
+  audit(req, "alert_rule_create", { ruleId: rule.id, name, metric });
+  res.status(201).json(rule);
+}));
+
+app.put("/api/alert-rules/:id", requireRole("manager"), ah(async (req, res) => {
+  const rule = await store.getAlertRule(req.params.id);
+  if (!rule) return res.status(404).json({ error: "rule not found" });
+  const updated = await store.updateAlertRule(req.params.id, req.body);
+  audit(req, "alert_rule_update", { ruleId: req.params.id, changes: Object.keys(req.body) });
+  res.json(updated);
+}));
+
+app.delete("/api/alert-rules/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteAlertRule(req.params.id);
+  audit(req, "alert_rule_delete", { ruleId: req.params.id });
+  res.status(204).end();
+}));
+
+app.post("/api/alert-rules/:id/test", requireRole("manager"), ah(async (req, res) => {
+  const rule = await store.getAlertRule(req.params.id);
+  if (!rule) return res.status(404).json({ error: "rule not found" });
+  const { deviceId, metricValue } = req.body;
+  if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
+  const value = metricValue !== undefined ? metricValue : rule.threshold + 1;
+  const triggered = await store.evaluateRulesForDevice(deviceId, rule.metric, value);
+  audit(req, "alert_rule_test", { ruleId: req.params.id, deviceId });
+  res.json({ triggered: triggered.length > 0, triggeredRules: triggered });
+}));
+
+// ============================================================
+// PHASE 3: Manufacturing — Production Orders, Events, Quality, Shifts
+// ============================================================
+
+// --- Production Orders ---
+app.get("/api/production-orders", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listProductionOrders({ status: req.query.status, productId: req.query.productId, deviceId: req.query.deviceId, lineId: req.query.lineId, from: req.query.from, to: req.query.to }));
+}));
+
+app.get("/api/production-orders/:id", requireUserMw, ah(async (req, res) => {
+  const order = await store.getProductionOrder(req.params.id);
+  if (!order) return res.status(404).json({ error: "order not found" });
+  res.json(order);
+}));
+
+app.post("/api/production-orders", requireRole("manager"), ah(async (req, res) => {
+  const order = await store.createProductionOrder(req.body);
+  audit(req, "production_order_create", { orderId: order.id });
+  res.status(201).json(order);
+}));
+
+app.put("/api/production-orders/:id", requireRole("manager"), ah(async (req, res) => {
+  const existing = await store.getProductionOrder(req.params.id);
+  if (!existing) return res.status(404).json({ error: "order not found" });
+  const updated = await store.updateProductionOrder(req.params.id, req.body);
+  audit(req, "production_order_update", { orderId: req.params.id });
+  res.json(updated);
+}));
+
+app.delete("/api/production-orders/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteProductionOrder(req.params.id);
+  audit(req, "production_order_delete", { orderId: req.params.id });
+  res.json({ ok: true });
+}));
+
+// --- Production Events ---
+app.get("/api/production-events", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listProductionEvents({ orderId: req.query.orderId, deviceId: req.query.deviceId, eventType: req.query.eventType }));
+}));
+
+app.post("/api/production-events", requireRole("manager"), ah(async (req, res) => {
+  const event = await store.createProductionEvent(req.body);
+  audit(req, "production_event_create", { eventId: event.id, eventType: event.eventType });
+  res.status(201).json(event);
+}));
+
+app.put("/api/production-events/:id/end", requireRole("manager"), ah(async (req, res) => {
+  const ended = await store.endProductionEvent(req.params.id);
+  if (!ended) return res.status(404).json({ error: "event not found or already ended" });
+  res.json(ended);
+}));
+
+// --- Quality Metrics ---
+app.get("/api/quality-metrics", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listQualityMetrics({ orderId: req.query.orderId, deviceId: req.query.deviceId, metricName: req.query.metricName }));
+}));
+
+app.post("/api/quality-metrics", requireRole("manager"), ah(async (req, res) => {
+  const metric = await store.addQualityMetric(req.body);
+  audit(req, "quality_metric_add", { metricId: metric.id, metricName: metric.metricName, pass: metric.pass });
+  res.status(201).json(metric);
+}));
+
+// --- Shift Templates ---
+app.get("/api/shift-templates", requireUserMw, ah(async (req, res) => {
+  res.json(await store.listShiftTemplates(req.user.orgId));
+}));
+
+app.post("/api/shift-templates", requireRole("manager"), ah(async (req, res) => {
+  const template = await store.createShiftTemplate({ ...req.body, orgId: req.user.orgId });
+  audit(req, "shift_template_create", { templateId: template.id });
+  res.status(201).json(template);
+}));
+
+app.put("/api/shift-templates/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.updateShiftTemplate(req.params.id, req.body);
+  audit(req, "shift_template_update", { templateId: req.params.id });
+  res.json({ ok: true });
+}));
+
+app.delete("/api/shift-templates/:id", requireRole("manager"), ah(async (req, res) => {
+  await store.deleteShiftTemplate(req.params.id);
+  audit(req, "shift_template_delete", { templateId: req.params.id });
+  res.json({ ok: true });
+}));
+
+// --- WebSocket section ---
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 function broadcast(msg) {
@@ -1921,6 +2708,8 @@ wss.on("connection", (ws, req) => {
         deviceId: d.id,
         reading: store.getLatest(d.id),
         stats: await store.getBagStats(d.id),
+        telemetry: await store.getLatestTelemetry(d.id),
+        assetStatus: await store.getAssetStatus(d.id),
       }))
     );
     ws.send(JSON.stringify({ type: "snapshot", devices: snapshot, alerts: store.listActiveAlerts() }));

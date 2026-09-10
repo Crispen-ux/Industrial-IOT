@@ -7,6 +7,9 @@ const METRICS = [
   { id: "deviation", label: "Target deviation" },
   { id: "giveaway", label: "Give-away / loss" },
   { id: "classification", label: "Bag classification" },
+  { id: "status_overview", label: "Status overview" },
+  { id: "metric_chart", label: "Metric chart" },
+  { id: "kpi_card", label: "KPI card" },
 ];
 const ROLES = ["operator", "manager", "admin"];
 const ROLE_RANK = { operator: 0, manager: 1, admin: 2 };
@@ -31,6 +34,12 @@ const readingsByDevice = new Map();
 const latestByDevice = new Map();
 const statsByDevice = new Map();
 const classificationByDevice = new Map();
+const latestTelemetry = new Map();
+const assetStatuses = new Map();
+let alertRules = [];
+let productionOrders = [];
+let qualityMetrics = [];
+let shiftTemplates = [];
 
 let currentView = "dashboard";
 let toasts = [];
@@ -50,6 +59,7 @@ let downtimeStats = [];
 let downtimeDeviceFilter = "";
 let spcDeviceId = "";
 let spcReadings = [];
+let spcMetric = "weight";
 let scheduledReports = [];
 let dashboardViews = [];
 let currentDashboardViewId = "";
@@ -157,6 +167,8 @@ async function loadInitial() {
     authFetch(`${API}/api/products`),
     authFetch(`${API}/api/templates`),
     authFetch(`${API}/api/maintenance`),
+    authFetch(`${API}/api/maintenance-schedules`),
+    authFetch(`${API}/api/maintenance-failures`),
     authFetch(`${API}/api/calibrations`),
     authFetch(`${API}/api/device-health`),
     brandingPromise,
@@ -172,6 +184,8 @@ async function loadInitial() {
     calls.push(authFetch(`${API}/api/device-groups`));
     calls.push(authFetch(`${API}/api/batches`));
     calls.push(authFetch(`${API}/api/ai-insights`));
+    calls.push(authFetch(`${API}/api/ml-models`));
+    calls.push(authFetch(`${API}/api/ml-predictions`));
     calls.push(authFetch(`${API}/api/organizations`));
     calls.push(authFetch(`${API}/api/report-templates`));
     calls.push(authFetch(`${API}/api/integrations`));
@@ -181,6 +195,13 @@ async function loadInitial() {
     calls.push(authFetch(`${API}/api/sso/providers`));
     calls.push(authFetch(`${API}/api/device-permissions`));
   }
+  calls.push(authFetch(`${API}/api/hierarchy`));
+  calls.push(authFetch(`${API}/api/asset-types`));
+  calls.push(authFetch(`${API}/api/asset-status`));
+  calls.push(authFetch(`${API}/api/production-orders`));
+  calls.push(authFetch(`${API}/api/quality-metrics`));
+  calls.push(authFetch(`${API}/api/shift-templates`));
+  calls.push(authFetch(`${API}/api/alert-rules`));
 
   const results = await Promise.all(calls);
   let i = 0;
@@ -193,6 +214,8 @@ async function loadInitial() {
   products = await results[i++].json();
   templates = await results[i++].json();
   maintenanceRecords = await results[i++].json();
+  maintenanceSchedules = await results[i++].json();
+  maintenanceFailures = await results[i++].json();
   calibrationRecords = await results[i++].json();
   deviceHealthScores = await results[i++].json();
   branding = await results[i++].json();
@@ -211,6 +234,8 @@ async function loadInitial() {
     deviceGroups = await results[i++].json();
     batches = await results[i++].json();
     aiInsights = await results[i++].json();
+    mlModels = await results[i++].json();
+    mlPredictions = await results[i++].json();
     organizations = await results[i++].json();
     reportTemplates = await results[i++].json();
     integrations = await results[i++].json();
@@ -220,6 +245,16 @@ async function loadInitial() {
     ssoProviders = await results[i++].json();
     devicePermissions = await results[i++].json();
   }
+  hierarchyData = await results[i++].json();
+  assetTypes = await results[i++].json();
+  const statusData = await results[i++].json();
+  if (Array.isArray(statusData)) {
+    statusData.forEach(s => assetStatuses.set(s.deviceId, s));
+  }
+  productionOrders = await results[i++].json();
+  qualityMetrics = await results[i++].json();
+  shiftTemplates = await results[i++].json();
+  alertRules = await results[i++].json();
   applyBranding();
   initPushNotifications();
   render();
@@ -271,9 +306,11 @@ function liveRender() {
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === "snapshot") {
-      msg.devices.forEach(({ deviceId, reading, stats }) => {
+      msg.devices.forEach(({ deviceId, reading, stats, telemetry, assetStatus }) => {
         if (reading) { latestByDevice.set(deviceId, reading); readingsByDevice.set(deviceId, [reading]); }
         if (stats) statsByDevice.set(deviceId, stats);
+        if (telemetry) latestTelemetry.set(deviceId, telemetry);
+        if (assetStatus) assetStatuses.set(deviceId, assetStatus);
       });
       if (msg.alerts) activeAlerts = msg.alerts;
       liveRender();
@@ -283,6 +320,13 @@ function liveRender() {
       hist.push(msg.reading);
       if (hist.length > 30) hist.shift();
       readingsByDevice.set(msg.deviceId, hist);
+      liveRender();
+    } else if (msg.type === "telemetry") {
+      latestTelemetry.set(msg.deviceId, { metrics: msg.metrics, connected: msg.connected, ts: msg.ts });
+      liveRender();
+    } else if (msg.type === "asset_status") {
+      const existing = assetStatuses.get(msg.deviceId) || {};
+      assetStatuses.set(msg.deviceId, { ...existing, deviceId: msg.deviceId, status: msg.status });
       liveRender();
     } else if (msg.type === "bag") {
       statsByDevice.set(msg.deviceId, msg.stats);
@@ -705,14 +749,15 @@ async function submitProductForm() {
 async function submitMaintenanceForm() {
   const deviceId = document.getElementById("mf-device").value;
   const dueDate = document.getElementById("mf-due").value;
+  const maintenanceType = document.getElementById("mf-type").value;
+  const priority = document.getElementById("mf-priority").value;
   const intervalDays = document.getElementById("mf-interval").value;
   const technician = document.getElementById("mf-tech").value.trim();
-  const notes = document.getElementById("mf-notes").value.trim();
   if (!deviceId) return;
   try {
-    const res = await authFetch(`${API}/api/maintenance`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, status: "SCHEDULED", dueDate: dueDate ? new Date(dueDate).toISOString() : null, intervalDays: intervalDays || null, technician, notes }) });
+    const res = await authFetch(`${API}/api/maintenance`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, status: "SCHEDULED", maintenanceType, priority, dueDate: dueDate ? new Date(dueDate).toISOString() : null, intervalDays: intervalDays || null, technician }) });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
-    await loadInitial();
+    await loadMaintenanceRecords();
     toast("Maintenance scheduled", "success");
   } catch (e) { toast("Failed: " + e.message, "error"); }
 }
@@ -857,9 +902,12 @@ function render() {
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: "▦" },
+    { id: "hierarchy", label: "Hierarchy", icon: "⬡" },
     { id: "devices", label: "Devices", icon: "⚙" },
+    { id: "asset-types", label: "Asset Types", icon: "◆" },
     { id: "products", label: "Products", icon: "⬡" },
     { id: "maintenance", label: "Maintenance", icon: " wrench" },
+    { id: "predictive", label: "Predictive", icon: "🔮" },
     { id: "calibration", label: "Calibration", icon: "⚖" },
     { id: "reports", label: "Reports", icon: "◫" },
     { id: "spc", label: "SPC", icon: ".defer" },
@@ -871,6 +919,11 @@ function render() {
   const adminItems = [];
   if (hasRole("manager")) {
     adminItems.push(
+      { id: "sensors", label: "Sensors", icon: "◎" },
+      { id: "alert-rules", label: "Alert Rules", icon: "⚡" },
+      { id: "production-orders", label: "Production Orders", icon: "📋" },
+      { id: "quality-metrics", label: "Quality", icon: "✓" },
+      { id: "shift-templates", label: "Shifts", icon: "◒" },
       { id: "gateway-keys", label: "Gateway Keys", icon: "⚷" },
       { id: "templates", label: "Templates", icon: "☰" },
       { id: "branding", label: "Branding", icon: "◉" },
@@ -890,9 +943,19 @@ function render() {
   if (hasRole("manager")) {
     adminItems.push({ id: "batches", label: "Batches", icon: "📦" });
     adminItems.push({ id: "ai-insights", label: "AI Insights", icon: "🤖" });
+    adminItems.push({ id: "ml-models", label: "ML Models", icon: "🧠" });
+    adminItems.push({ id: "ml-analysis", label: "ML Analysis", icon: "📈" });
     adminItems.push({ id: "report-builder", label: "Report Builder", icon: "📋" });
     adminItems.push({ id: "integrations", label: "Integrations", icon: "🔗" });
+    adminItems.push({ id: "webhooks", label: "Webhooks", icon: "훅" });
+    adminItems.push({ id: "integration-mappings", label: "Mappings", icon: "⊞" });
+    adminItems.push({ id: "data-export", label: "Export", icon: "📤" });
+    adminItems.push({ id: "data-import", label: "Import", icon: "📥" });
     adminItems.push({ id: "api-usage", label: "API Usage", icon: "📊" });
+    adminItems.push({ id: "api-discovery", label: "API Docs", icon: "📖" });
+    adminItems.push({ id: "analytics", label: "Analytics", icon: "📈" });
+    adminItems.push({ id: "system-health", label: "System", icon: "💻" });
+    adminItems.push({ id: "sessions", label: "Sessions", icon: "🔑" });
   }
 
   // If sidebar already exists, just update the main content + alert badge.
@@ -1060,12 +1123,20 @@ async function disable2FA() {
 function renderView() {
   switch (currentView) {
     case "dashboard": return viewDashboard();
+    case "hierarchy": return viewHierarchy();
     case "devices": return viewDevices();
+    case "asset-types": return viewAssetTypes();
     case "products": return viewProducts();
     case "maintenance": return viewMaintenance();
+    case "predictive": return viewPredictiveMaintenance();
     case "calibration": return viewCalibration();
     case "reports": return viewReports();
     case "alerts": return viewAlerts();
+    case "sensors": return viewSensors();
+    case "alert-rules": return viewAlertRules();
+    case "production-orders": return viewProductionOrders();
+    case "quality-metrics": return viewQualityMetrics();
+    case "shift-templates": return viewShiftTemplates();
     case "gateway-keys": return viewGatewayKeys();
     case "templates": return viewTemplates();
     case "branding": return viewBranding();
@@ -1083,9 +1154,19 @@ function renderView() {
     case "device-perms": return viewDevicePermissions(permUserId);
     case "batches": return viewBatches();
     case "ai-insights": return viewAIInsights();
+    case "ml-models": return viewMLModels();
+    case "ml-analysis": return viewMLAnalysis();
     case "organizations": return viewOrganizations();
     case "report-builder": return viewReportBuilder();
     case "integrations": return viewIntegrations();
+    case "webhooks": return viewWebhookConfigs();
+    case "integration-mappings": return viewIntegrationMappings();
+    case "data-export": return viewDataExport();
+    case "data-import": return viewDataImport();
+    case "api-discovery": return viewAPIDiscovery();
+    case "analytics": return viewAdvancedAnalytics();
+    case "system-health": return viewSystemHealth();
+    case "sessions": return viewSessions();
     case "api-usage": return viewAPIUsage();
     default: return viewDashboard();
   }
@@ -1232,6 +1313,39 @@ function renderWidget(widget) {
     body = `<div class="big-number" style="font-size:32px;color:${color};">${cls || "—"}</div>
       <div style="font-size:11px;color:#5B6673;" class="mono">${product ? `vs ${esc(product.name)}` : "no product"}</div>
       <div class="widget-footer"><span>U:${stats.countUnder||0}</span><span>P:${stats.countPass||0}</span><span>O:${stats.countOver||0}</span></div>`;
+  } else if (widget.metric === "status_overview") {
+    const status = assetStatuses.get(device.id);
+    const statusColor = status?.status === "running" ? "#4FD1B5" : status?.status === "warning" ? "#F2B705" : status?.status === "critical" ? "#E5484D" : "#5B6673";
+    const statusLabel = status?.status || "unknown";
+    body = `<div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
+      <div style="width:12px;height:12px;border-radius:50%;background:${statusColor};"></div>
+      <div class="big-number" style="font-size:20px;color:${statusColor};">${statusLabel.toUpperCase()}</div>
+    </div>
+    <div style="font-size:11px;color:#5B6673;margin-top:4px;">${status?.statusText || "No data"}</div>
+    <div class="widget-footer">
+      <span>${status?.lastSeenAt ? new Date(status.lastSeenAt).toLocaleTimeString() : "never"}</span>
+    </div>`;
+  } else if (widget.metric === "metric_chart") {
+    const telemetry = latestTelemetry.get(device.id);
+    const metrics = telemetry?.metrics || {};
+    const metricNames = Object.keys(metrics).filter(k => typeof metrics[k] === "number");
+    const latest = metricNames.map(k => `${k}: ${metrics[k]}`).join(" · ") || "No metrics";
+    body = `<div style="font-size:12px;color:#8B95A1;margin-top:4px;">${latest}</div>
+      <div class="widget-footer">
+        <span>${device.protocol}</span>
+        <span class="${connected ? "status-live" : "status-off"}">${connected ? "● LIVE" : "● OFFLINE"}</span>
+      </div>`;
+  } else if (widget.metric === "kpi_card") {
+    const telemetry = latestTelemetry.get(device.id);
+    const metrics = telemetry?.metrics || {};
+    const weight = metrics.weight !== undefined ? metrics.weight : (reading?.weight || null);
+    const bagCount = metrics.bag_count !== undefined ? metrics.bag_count : (reading?.bagCount || 0);
+    body = `<div class="big-number" style="font-size:28px;">${weight !== null ? weight.toFixed(2) : "—"}</div>
+      <div style="font-size:11px;color:#5B6673;">${device.unit || "kg"} · ${bagCount} bags</div>
+      <div class="widget-footer">
+        <span>${device.protocol}</span>
+        <span class="${connected ? "status-live" : "status-off"}">${connected ? "● LIVE" : "● OFFLINE"}</span>
+      </div>`;
   }
 
   return `<div class="widget" data-widget-id="${widget.id}">
@@ -1339,35 +1453,55 @@ function viewProducts() {
 // ---------- Maintenance ----------
 
 function viewMaintenance() {
+  const totalCost = maintenanceRecords.filter(m => m.status === "COMPLETED").reduce((s, m) => s + (m.totalCost || 0), 0);
+  const totalDowntime = maintenanceRecords.filter(m => m.status === "COMPLETED").reduce((s, m) => s + (m.downtimeMinutes || 0), 0);
+  const dueCount = maintenanceRecords.filter(m => m.status === "SCHEDULED" && m.dueDate && new Date(m.dueDate) < new Date(Date.now() + 7 * 86400000)).length;
+
   return `
     <div class="top-bar">
-      <div><h2>Maintenance</h2><div class="subtitle">${maintenanceRecords.length} records</div></div>
+      <div><h2>Maintenance</h2><div class="subtitle">${maintenanceRecords.length} records | ${dueCount} due soon</div></div>
+      <div class="top-bar-actions">
+        <button class="btn btn-sm" onclick="viewMaintenanceSchedules()">Schedules</button>
+        <button class="btn btn-sm" onclick="viewMaintenanceFailures()">Failures</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px;">
+      <div class="form-card" style="text-align:center;padding:12px;"><div style="font-size:11px;color:var(--muted);">Total Cost</div><div style="font-size:20px;font-weight:600;color:#F2B705;">$${totalCost.toFixed(2)}</div></div>
+      <div class="form-card" style="text-align:center;padding:12px;"><div style="font-size:11px;color:var(--muted);">Downtime</div><div style="font-size:20px;font-weight:600;color:#E5484D;">${Math.round(totalDowntime / 60)}h</div></div>
+      <div class="form-card" style="text-align:center;padding:12px;"><div style="font-size:11px;color:var(--muted);">Completed</div><div style="font-size:20px;font-weight:600;color:#27ae60;">${maintenanceRecords.filter(m => m.status === "COMPLETED").length}</div></div>
+      <div class="form-card" style="text-align:center;padding:12px;"><div style="font-size:11px;color:var(--muted);">Scheduled</div><div style="font-size:20px;font-weight:600;">${maintenanceRecords.filter(m => m.status === "SCHEDULED").length}</div></div>
     </div>
     ${hasRole("manager") ? `
     <div class="form-card">
       <div class="section-label mono" style="margin-bottom:10px;">Schedule maintenance</div>
-      <div class="form-grid" style="grid-template-columns:1fr 1fr 0.7fr 1fr 1fr auto;">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 0.7fr 0.7fr 0.7fr 1fr auto;">
         <div><label>Device</label><select id="mf-device">${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
         <div><label>Due date</label><input id="mf-due" type="date" /></div>
+        <div><label>Type</label><select id="mf-type"><option value="preventive">Preventive</option><option value="corrective">Corrective</option><option value="predictive">Predictive</option></select></div>
+        <div><label>Priority</label><select id="mf-priority"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="critical">Critical</option></select></div>
         <div><label>Interval (days)</label><input id="mf-interval" placeholder="90" /></div>
         <div><label>Technician</label><input id="mf-tech" placeholder="name" /></div>
-        <div><label>Notes</label><input id="mf-notes" placeholder="optional" /></div>
         <button class="btn btn-primary" onclick="submitMaintenanceForm()">+ Schedule</button>
       </div>
     </div>` : ""}
     <div class="form-card">
-      <div class="list-header"><span>WO #</span><span style="flex:2;">Device</span><span>Due</span><span>Status</span><span></span></div>
+      <div class="list-header"><span>WO #</span><span style="flex:2;">Device</span><span>Type</span><span>Priority</span><span>Due</span><span>Cost</span><span>Status</span><span></span></div>
       ${maintenanceRecords.map(m => {
         const device = devices.find(d => d.id === m.deviceId);
         const sc = m.status === "COMPLETED" ? "active" : m.status === "CANCELLED" ? "inactive" : m.status === "IN_PROGRESS" ? "warning" : "";
+        const typeColors = { preventive: "#3B82F6", corrective: "#E5484D", predictive: "#8B5CF6" };
+        const priColors = { low: "#8B95A1", normal: "#3B82F6", high: "#F2B705", critical: "#E5484D" };
         return `<div class="list-row">
           <span class="list-cell mono">${esc(m.workOrderNumber)}</span>
           <span class="list-cell" style="flex:2;">${device ? esc(device.name) : m.deviceId}</span>
+          <span class="list-cell" style="font-size:11px;color:${typeColors[m.maintenanceType] || "#8B95A1"};">${m.maintenanceType || "corrective"}</span>
+          <span class="list-cell" style="font-size:11px;color:${priColors[m.priority] || "#8B95A1"};">${m.priority || "normal"}</span>
           <span class="list-cell mono">${m.dueDate ? new Date(m.dueDate).toLocaleDateString() : "—"}</span>
+          <span class="list-cell mono">${m.totalCost > 0 ? "$" + m.totalCost.toFixed(2) : "—"}</span>
           <span class="list-cell"><span class="status-badge ${sc}">${m.status}</span></span>
           <span class="list-cell sm">
             ${hasRole("manager") && m.status === "SCHEDULED" ? `<button class="btn btn-sm" onclick="updateMaintenanceStatus('${m.id}','IN_PROGRESS')">Start</button>` : ""}
-            ${hasRole("manager") && m.status === "IN_PROGRESS" ? `<button class="btn btn-sm" onclick="updateMaintenanceStatus('${m.id}','COMPLETED')">Done</button>` : ""}
+            ${hasRole("manager") && m.status === "IN_PROGRESS" ? `<button class="btn btn-sm" onclick="showCompleteMaintenance('${m.id}')">Done</button>` : ""}
             ${hasRole("manager") && (m.status === "SCHEDULED" || m.status === "IN_PROGRESS") ? `<button class="btn btn-sm btn-danger" onclick="updateMaintenanceStatus('${m.id}','CANCELLED')">Cancel</button>` : ""}
           </span>
         </div>`;
@@ -1375,7 +1509,347 @@ function viewMaintenance() {
     </div>`;
 }
 
+function showCompleteMaintenance(id) {
+  const m = maintenanceRecords.find(r => r.id === id);
+  if (!m) return;
+  const html = `<div class="form-card" style="margin-bottom:16px;">
+    <div class="section-label mono" style="margin-bottom:10px;">Complete: ${esc(m.workOrderNumber)}</div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr;">
+      <div><label>Failure Mode</label><input id="cm-failure" placeholder="e.g. sensor drift" /></div>
+      <div><label>Root Cause</label><input id="cm-root" placeholder="e.g. worn bearing" /></div>
+      <div><label>Parts Cost ($)</label><input id="cm-parts" type="number" step="0.01" value="0" /></div>
+      <div><label>Labour Cost ($)</label><input id="cm-labour" type="number" step="0.01" value="0" /></div>
+      <div><label>Labour Hours</label><input id="cm-hours" type="number" step="0.1" value="1" /></div>
+      <div><label>Downtime (min)</label><input id="cm-down" type="number" value="0" /></div>
+    </div>
+    <div style="margin-top:8px;"><label>Notes</label><input id="cm-notes" style="width:100%;" placeholder="Additional notes..." /></div>
+    <div style="margin-top:8px;"><button class="btn btn-primary" onclick="submitCompleteMaintenance('${id}')">Complete & Save</button> <button class="btn" onclick="render()">Cancel</button></div>
+  </div>`;
+  document.getElementById("main-content").insertAdjacentHTML("afterbegin", html);
+}
+
+async function submitCompleteMaintenance(id) {
+  const body = {
+    status: "COMPLETED",
+    failureMode: document.getElementById("cm-failure").value,
+    rootCause: document.getElementById("cm-root").value,
+    partsCost: parseFloat(document.getElementById("cm-parts").value) || 0,
+    labourCost: parseFloat(document.getElementById("cm-labour").value) || 0,
+    labourHours: parseFloat(document.getElementById("cm-hours").value) || 0,
+    downtimeMinutes: parseInt(document.getElementById("cm-down").value) || 0,
+    notes: document.getElementById("cm-notes").value,
+  };
+  await authFetch(`${API}/api/maintenance/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  toast("Maintenance completed", "success");
+  await loadMaintenanceRecords();
+}
+
+// ---------- Maintenance Schedules ----------
+
+let maintenanceSchedules = [];
+let maintenanceFailures = [];
+let mlModels = [];
+let mlPredictions = [];
+
+async function loadMaintenanceSchedules() {
+  try { const res = await authFetch(`${API}/api/maintenance-schedules`); maintenanceSchedules = await res.json(); } catch (e) { maintenanceSchedules = []; }
+}
+
+async function loadMaintenanceFailures() {
+  try { const res = await authFetch(`${API}/api/maintenance-failures`); maintenanceFailures = await res.json(); } catch (e) { maintenanceFailures = []; }
+}
+
+function viewMaintenanceSchedules() {
+  return `
+    <div class="top-bar">
+      <div><h2>Maintenance Schedules</h2><div class="subtitle">Preventive maintenance rules</div></div>
+      <div class="top-bar-actions">
+        <button class="btn" onclick="currentView='maintenance';render();">Back</button>
+        ${hasRole("manager") ? `<button class="btn btn-primary" onclick="showNewMaintenanceSchedule()">+ New Schedule</button>` : ""}
+        ${hasRole("manager") ? `<button class="btn" onclick="generateFromSchedules()">Generate Now</button>` : ""}
+      </div>
+    </div>
+    <div id="ms-form-area"></div>
+    <div class="form-card">
+      ${maintenanceSchedules.length ? maintenanceSchedules.map(s => {
+        const device = devices.find(d => d.id === s.deviceId);
+        return `<div class="list-row">
+          <span class="list-cell" style="flex:2;">
+            <div style="font-weight:500;">${esc(s.name)}</div>
+            <div style="font-size:11px;color:var(--muted);">${device ? esc(device.name) : s.deviceId}</div>
+          </span>
+          <span class="list-cell" style="font-size:11px;">${esc(s.maintenanceType)}</span>
+          <span class="list-cell mono">Every ${s.intervalDays} days</span>
+          <span class="list-cell">${s.reminderDays || 7}d reminder</span>
+          <span class="list-cell">${s.technician || "Any"}</span>
+          <span class="list-cell"><span class="status-badge ${s.enabled ? "active" : "inactive"}">${s.enabled ? "Enabled" : "Disabled"}</span></span>
+          <span class="list-cell sm">
+            ${hasRole("manager") ? `<button class="btn btn-sm btn-danger" onclick="deleteMaintenanceSchedule('${s.id}')">✕</button>` : ""}
+          </span>
+        </div>`;
+      }).join("") : `<div class="empty">No maintenance schedules defined.</div>`}
+    </div>`;
+}
+
+function showNewMaintenanceSchedule() {
+  document.getElementById("ms-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">New Maintenance Schedule</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr auto;">
+        <div><label>Name</label><input id="ms-name" placeholder="Weekly Inspection" /></div>
+        <div><label>Device</label><select id="ms-device">${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
+        <div><label>Interval (days)</label><input id="ms-interval" type="number" value="30" /></div>
+        <div><label>Type</label><select id="ms-type"><option value="preventive">Preventive</option><option value="predictive">Predictive</option></select></div>
+        <div><label>Reminder (days)</label><input id="ms-reminder" type="number" value="7" /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="createMaintenanceSchedule()">Create</button></div>
+      </div>
+    </div>`;
+}
+
+async function createMaintenanceSchedule() {
+  const name = document.getElementById("ms-name").value || "Schedule";
+  const deviceId = document.getElementById("ms-device").value;
+  const intervalDays = parseInt(document.getElementById("ms-interval").value) || 30;
+  const maintenanceType = document.getElementById("ms-type").value;
+  const reminderDays = parseInt(document.getElementById("ms-reminder").value) || 7;
+  await authFetch(`${API}/api/maintenance-schedules`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, deviceId, intervalDays, maintenanceType, reminderDays }) });
+  toast("Schedule created", "success");
+  await loadMaintenanceSchedules();
+  render();
+}
+
+async function deleteMaintenanceSchedule(id) {
+  if (!confirm("Delete this schedule?")) return;
+  await authFetch(`${API}/api/maintenance-schedules/${id}`, { method: "DELETE" });
+  toast("Schedule deleted", "success");
+  await loadMaintenanceSchedules();
+  render();
+}
+
+async function generateFromSchedules() {
+  const res = await authFetch(`${API}/api/maintenance-schedules/generate`, { method: "POST" });
+  const data = await res.json();
+  toast(`Generated ${data.generated} maintenance record(s)`, "success");
+  await loadMaintenanceRecords();
+  render();
+}
+
+// ---------- Maintenance Failures ----------
+
+function viewMaintenanceFailures() {
+  return `
+    <div class="top-bar">
+      <div><h2>Maintenance Failures</h2><div class="subtitle">Track failures for MTBF analysis</div></div>
+      <div class="top-bar-actions">
+        <button class="btn" onclick="currentView='maintenance';render();">Back</button>
+        ${hasRole("manager") ? `<button class="btn btn-primary" onclick="showNewFailure()">+ Log Failure</button>` : ""}
+      </div>
+    </div>
+    <div id="mf-fail-form-area"></div>
+    <div class="form-card">
+      <div class="list-header"><span>Time</span><span style="flex:1.5;">Device</span><span>Type</span><span>Mode</span><span>Severity</span><span>Downtime</span><span>Cost</span><span></span></div>
+      ${maintenanceFailures.length ? maintenanceFailures.map(f => {
+        const device = devices.find(d => d.id === f.deviceId);
+        const sevColors = { low: "#8B95A1", normal: "#F2B705", high: "#E5484D", critical: "#E5484D" };
+        return `<div class="list-row">
+          <span class="list-cell" style="font-size:12px;">${new Date(f.occurredAt).toLocaleString()}</span>
+          <span class="list-cell" style="flex:1.5;">${device ? esc(device.name) : f.deviceId}</span>
+          <span class="list-cell" style="font-size:11px;">${esc(f.failureType)}</span>
+          <span class="list-cell" style="font-size:11px;">${esc(f.failureMode || "-")}</span>
+          <span class="list-cell" style="font-size:11px;color:${sevColors[f.severity] || "#8B95A1"};">${f.severity}</span>
+          <span class="list-cell mono">${f.downtimeMinutes || 0}m</span>
+          <span class="list-cell mono">${f.cost > 0 ? "$" + f.cost.toFixed(2) : "—"}</span>
+          <span class="list-cell sm">${f.resolvedAt ? '<span class="status-badge active">Resolved</span>' : `<button class="btn btn-sm" onclick="resolveFailure('${f.id}')">Resolve</button>`}</span>
+        </div>`;
+      }).join("") : `<div class="empty">No failure records.</div>`}
+    </div>`;
+}
+
+function showNewFailure() {
+  document.getElementById("mf-fail-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">Log Failure</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr auto;">
+        <div><label>Device</label><select id="fl-device">${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
+        <div><label>Type</label><input id="fl-type" placeholder="e.g. mechanical" /></div>
+        <div><label>Failure Mode</label><input id="fl-mode" placeholder="e.g. sensor drift" /></div>
+        <div><label>Severity</label><select id="fl-severity"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="critical">Critical</option></select></div>
+        <div><label>Cost ($)</label><input id="fl-cost" type="number" step="0.01" value="0" /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="addFailure()">Log</button></div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Description</label><input id="fl-desc" placeholder="What happened" /></div>
+        <div><label>Root Cause</label><input id="fl-root" placeholder="Why it happened" /></div>
+        <div><label>Downtime (min)</label><input id="fl-down" type="number" value="0" /></div>
+      </div>
+    </div>`;
+}
+
+async function addFailure() {
+  const deviceId = document.getElementById("fl-device").value;
+  const failureType = document.getElementById("fl-type").value || "unknown";
+  const failureMode = document.getElementById("fl-mode").value;
+  const severity = document.getElementById("fl-severity").value;
+  const cost = parseFloat(document.getElementById("fl-cost").value) || 0;
+  const description = document.getElementById("fl-desc").value;
+  const rootCause = document.getElementById("fl-root").value;
+  const downtimeMinutes = parseInt(document.getElementById("fl-down").value) || 0;
+  await authFetch(`${API}/api/maintenance-failures`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, failureType, failureMode, severity, cost, description, rootCause, downtimeMinutes }) });
+  toast("Failure logged", "success");
+  await loadMaintenanceFailures();
+  render();
+}
+
+async function resolveFailure(id) {
+  const resolution = prompt("Describe the resolution:");
+  if (resolution === null) return;
+  await authFetch(`${API}/api/maintenance-failures/${id}/resolve`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ resolution }) });
+  toast("Failure resolved", "success");
+  await loadMaintenanceFailures();
+  render();
+}
+
 // ---------- Calibration ----------
+
+// ============================================================
+// PHASE 6: Predictive Maintenance — Frontend Views
+// ============================================================
+
+let healthTrend = null;
+let rulEstimate = null;
+let failureAnalysis = null;
+let costAnalysis = null;
+
+function viewPredictiveMaintenance() {
+  return `
+    <div class="top-bar">
+      <div><h2>Predictive Maintenance</h2><div class="subtitle">Health trends, RUL, optimization</div></div>
+      <div class="top-bar-actions">
+        <button class="btn" onclick="currentView='maintenance';render();">Back</button>
+      </div>
+    </div>
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="form-grid" style="grid-template-columns:1fr auto;">
+        <div><label>Device</label><select id="pm-device" onchange="loadPredictiveData()">${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
+        <button class="btn btn-primary" onclick="loadPredictiveData()" style="align-self:end;">Analyze</button>
+      </div>
+    </div>
+    <div id="pm-results">
+      ${healthTrend ? renderHealthTrend() : ""}
+      ${rulEstimate ? renderRUL() : ""}
+      ${failureAnalysis ? renderFailureAnalysis() : ""}
+      ${costAnalysis ? renderCostAnalysis() : ""}
+      ${!healthTrend && !rulEstimate && !failureAnalysis && !costAnalysis ? '<div class="form-card" style="text-align:center;padding:30px;color:var(--muted);">Select a device and click Analyze to see predictive insights.</div>' : ""}
+    </div>`;
+}
+
+async function loadPredictiveData() {
+  const deviceId = document.getElementById("pm-device")?.value || devices[0]?.id;
+  if (!deviceId) return;
+  toast("Analyzing...", "info");
+  try {
+    const [trendRes, rulRes, failRes, costRes] = await Promise.all([
+      authFetch(`${API}/api/devices/${deviceId}/health-trend`),
+      authFetch(`${API}/api/devices/${deviceId}/rul`),
+      authFetch(`${API}/api/devices/${deviceId}/failure-analysis`),
+      authFetch(`${API}/api/devices/${deviceId}/cost-analysis`),
+    ]);
+    healthTrend = await trendRes.json();
+    rulEstimate = await rulRes.json();
+    failureAnalysis = await failRes.json();
+    costAnalysis = await costRes.json();
+    render();
+  } catch (e) { toast("Analysis failed", "error"); }
+}
+
+function renderHealthTrend() {
+  if (!healthTrend || healthTrend.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${healthTrend?.message || "No data"}</div>`;
+  const t = healthTrend;
+  const dirColor = t.trend.direction === "degrading" ? "#E5484D" : t.trend.direction === "improving" ? "#27ae60" : "#3B82F6";
+  return `<div class="form-card" style="margin-bottom:16px;">
+    <div class="section-label mono" style="margin-bottom:12px;">Health Trend</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Current</span><span class="kv-value mono" style="color:${t.stats.currentScore >= 80 ? "#27ae60" : t.stats.currentScore >= 50 ? "#F2B705" : "#E5484D"};">${t.stats.currentScore}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Average</span><span class="kv-value mono">${t.stats.averageScore}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Trend</span><span class="kv-value mono" style="color:${dirColor};">${t.trend.direction}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Degradation</span><span class="kv-value mono">${t.trend.degradationRate} pts/wk</span></div>
+    </div>
+    <div class="kv-row"><span class="kv-label">Volatility</span><span class="kv-value">${t.stats.volatility}</span></div>
+    <div class="kv-row"><span class="kv-label">Old Avg</span><span class="kv-value">${t.comparison.oldAverage}</span></div>
+    <div class="kv-row"><span class="kv-label">Recent Avg</span><span class="kv-value">${t.comparison.recentAverage}</span></div>
+    <div class="kv-row"><span class="kv-label">Change</span><span class="kv-value" style="color:${t.comparison.change >= 0 ? "#27ae60" : "#E5484D"};">${t.comparison.change > 0 ? "+" : ""}${t.comparison.change}</span></div>
+    ${t.history.length ? `<div style="margin-top:12px;font-size:11px;color:var(--muted);">Score history:</div>
+    <div style="display:flex;gap:2px;margin-top:4px;align-items:end;height:40px;">
+      ${t.history.map(h => `<div style="flex:1;background:${h.score >= 80 ? "#27ae60" : h.score >= 50 ? "#F2B705" : "#E5484D"};height:${h.score}%;min-height:2px;border-radius:2px 2px 0 0;" title="${h.score} at ${new Date(h.at).toLocaleDateString()}"></div>`).join("")}
+    </div>` : ""}
+  </div>`;
+}
+
+function renderRUL() {
+  if (!rulEstimate || rulEstimate.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${rulEstimate?.message || "No data"}</div>`;
+  const r = rulEstimate;
+  const urgColor = r.urgency === "critical" ? "#E5484D" : r.urgency === "high" ? "#F2B705" : r.urgency === "medium" ? "#3B82F6" : "#27ae60";
+  return `<div class="form-card" style="margin-bottom:16px;border-left:4px solid ${urgColor};">
+    <div class="section-label mono" style="margin-bottom:12px;">Remaining Useful Life</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">RUL</span><span class="kv-value mono" style="font-size:24px;color:${urgColor};">${r.rulDays} days</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Confidence</span><span class="kv-value mono">${(r.confidence * 100).toFixed(0)}%</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Health Score</span><span class="kv-value mono">${r.currentScore}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Threshold</span><span class="kv-value mono">${r.failureThreshold}</span></div>
+    </div>
+    <div class="kv-row"><span class="kv-label">Degradation Rate</span><span class="kv-value">${r.degradationRate} pts/wk</span></div>
+    <div class="kv-row"><span class="kv-label">Est. Failure</span><span class="kv-value">${r.estimatedFailureDate ? new Date(r.estimatedFailureDate).toLocaleDateString() : "N/A"}</span></div>
+    <div class="kv-row"><span class="kv-label">Urgency</span><span class="kv-value" style="color:${urgColor};font-weight:600;">${r.urgency.toUpperCase()}</span></div>
+    <div style="margin-top:12px;padding:10px;background:#1B2129;border-radius:6px;font-size:12px;color:var(--muted);">${r.recommendation}</div>
+  </div>`;
+}
+
+function renderFailureAnalysis() {
+  if (!failureAnalysis || failureAnalysis.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${failureAnalysis?.message || "No data"}</div>`;
+  const f = failureAnalysis;
+  return `<div class="form-card" style="margin-bottom:16px;">
+    <div class="section-label mono" style="margin-bottom:12px;">Failure Mode Analysis</div>
+    <div class="kv-row"><span class="kv-label">Total Failures</span><span class="kv-value">${f.totalFailures}</span></div>
+    ${f.timeAnalysis.avgIntervalHours ? `<div class="kv-row"><span class="kv-label">Avg Interval</span><span class="kv-value">${f.timeAnalysis.avgIntervalHours}h</span></div>` : ""}
+    ${f.byType.length ? `<div style="margin-top:12px;font-size:12px;color:var(--muted);margin-bottom:8px;">By Type:</div>
+    ${f.byType.map(t => `<div class="list-row">
+      <span class="list-cell" style="flex:2;font-weight:500;">${esc(t.type)}</span>
+      <span class="list-cell mono">${t.count}x</span>
+      <span class="list-cell mono">${t.totalDowntime}m</span>
+      <span class="list-cell mono">$${t.totalCost.toFixed(2)}</span>
+      <span class="list-cell" style="font-size:11px;color:var(--muted);">${t.topMode ? `Top: ${esc(t.topMode)}` : ""}</span>
+    </div>`).join("")}` : ""}
+    ${f.topRootCauses.length ? `<div style="margin-top:12px;font-size:12px;color:var(--muted);margin-bottom:8px;">Top Root Causes:</div>
+    ${f.topRootCauses.map(r => `<div class="list-row"><span class="list-cell" style="flex:2;">${esc(r.cause)}</span><span class="list-cell mono">${r.count}x</span></div>`).join("")}` : ""}
+  </div>`;
+}
+
+function renderCostAnalysis() {
+  if (!costAnalysis || costAnalysis.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${costAnalysis?.message || "No data"}</div>`;
+  const c = costAnalysis;
+  return `<div class="form-card" style="margin-bottom:16px;">
+    <div class="section-label mono" style="margin-bottom:12px;">Cost Optimization Analysis</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Total Cost</span><span class="kv-value mono">$${c.summary.totalCost.toFixed(2)}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Avg/Event</span><span class="kv-value mono">$${c.summary.avgCostPerEvent.toFixed(2)}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Total Downtime</span><span class="kv-value mono">${c.summary.totalDowntime}m</span></div>
+    </div>
+    ${c.byType.length ? `<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">By Type:</div>
+    ${c.byType.map(t => `<div class="list-row">
+      <span class="list-cell" style="flex:1.5;">${esc(t.type)}</span>
+      <span class="list-cell mono">$${t.cost.toFixed(2)}</span>
+      <span class="list-cell mono">${t.count} events</span>
+      <span class="list-cell mono">${t.downtime}m downtime</span>
+    </div>`).join("")}` : ""}
+    <div style="margin-top:12px;padding:10px;background:#1B2129;border-radius:6px;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">Optimization</div>
+      <div class="kv-row"><span class="kv-label">Corrective %</span><span class="kv-value" style="color:${c.optimization.correctiveRatio > 60 ? "#E5484D" : "#F2B705"};">${c.optimization.correctiveRatio}%</span></div>
+      <div class="kv-row"><span class="kv-label">Preventive %</span><span class="kv-value" style="color:#27ae60;">${c.optimization.preventiveRatio}%</span></div>
+      <div class="kv-row"><span class="kv-label">Potential Savings</span><span class="kv-value" style="color:#27ae60;">$${c.optimization.potentialSavings.toFixed(2)}</span></div>
+      <div style="margin-top:6px;font-size:11px;color:var(--muted);">${c.optimization.recommendation}</div>
+    </div>
+  </div>`;
+}
 
 function viewCalibration() {
   return `
@@ -1959,10 +2433,10 @@ function renderOEEData() {
         <div class="kv-row"><span class="kv-label">Planned time</span><span class="kv-value">${formatDuration(d.plannedSeconds)}</span></div>
         <div class="kv-row"><span class="kv-label">Operating time</span><span class="kv-value">${formatDuration(d.operatingSeconds)}</span></div>
         <div class="kv-row"><span class="kv-label">Downtime</span><span class="kv-value" style="color:#E5484D;">${formatDuration(d.downtimeSeconds)}</span></div>
-        <div class="kv-row"><span class="kv-label">Total bags</span><span class="kv-value">${d.totalBags}</span></div>
-        <div class="kv-row"><span class="kv-label">Good bags</span><span class="kv-value" style="color:#27ae60;">${d.goodBags}</span></div>
-        <div class="kv-row"><span class="kv-label">Over target</span><span class="kv-value" style="color:#E5484D;">${d.overBags}</span></div>
-        <div class="kv-row"><span class="kv-label">Under target</span><span class="kv-value" style="color:#F2B705;">${d.underBags}</span></div>
+        <div class="kv-row"><span class="kv-label">Total units</span><span class="kv-value">${d.totalUnits || d.totalBags}</span></div>
+        <div class="kv-row"><span class="kv-label">Good units</span><span class="kv-value" style="color:#27ae60;">${d.goodUnits || d.goodBags}</span></div>
+        <div class="kv-row"><span class="kv-label">Rejects</span><span class="kv-value" style="color:#E5484D;">${d.rejectUnits || d.overBags}</span></div>
+        <div class="kv-row"><span class="kv-label">Source</span><span class="kv-value" style="font-size:12px;">${d.hasOrders ? "Production orders" : "Readings"}</span></div>
       </div>
     </div>`;
 }
@@ -2056,11 +2530,11 @@ function renderSPCCharts(readings, target, product) {
       </div>
     </div>
     <div class="form-card">
-      <div class="section-label mono" style="margin-bottom:10px;">X-bar Chart (Individual Readings)</div>
+      <div class="section-label mono" style="margin-bottom:10px;">X-bar Chart (Individual Readings) — ${esc(spcMetric)}</div>
       <canvas id="spc-xbar" height="200"></canvas>
     </div>
     <div class="form-card" style="margin-top:16px;">
-      <div class="section-label mono" style="margin-bottom:10px;">Histogram (Weight Distribution)</div>
+      <div class="section-label mono" style="margin-bottom:10px;">Histogram (${esc(spcMetric)} Distribution)</div>
       <canvas id="spc-histogram" height="160"></canvas>
     </div>
   `;
@@ -2070,12 +2544,29 @@ function viewSPC() {
   const device = devices.find(d => d.id === spcDeviceId) || devices[0];
   const product = products.find(p => p.id === device?.productId);
 
+  // Collect all available metrics for this device
+  const availableMetrics = [
+    { id: "weight", label: "Weight (from readings)" },
+    { id: "bag_count", label: "Bag Count" },
+  ];
+  const telemetry = latestTelemetry.get(device?.id);
+  if (telemetry?.metrics) {
+    for (const [k, v] of Object.entries(telemetry.metrics)) {
+      if (typeof v === "number" && !availableMetrics.find(m => m.id === k)) {
+        availableMetrics.push({ id: k, label: k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, " ") });
+      }
+    }
+  }
+
   return `
     <div class="top-bar">
       <div><h2>SPC Analysis</h2><div class="subtitle">Statistical Process Control — X-bar, Cpk, Histogram</div></div>
       <div class="top-bar-actions">
         <select onchange="spcDeviceId=this.value;loadSPCData()" style="padding:6px 10px;border-radius:6px;background:#1B2129;color:#E8EAED;border:1px solid #2A333D;">
           ${devices.map(d => `<option value="${d.id}" ${d.id === spcDeviceId ? "selected" : ""}>${esc(d.name)}</option>`).join("")}
+        </select>
+        <select onchange="spcMetric=this.value;loadSPCData()" style="padding:6px 10px;border-radius:6px;background:#1B2129;color:#E8EAED;border:1px solid #2A333D;margin-left:8px;">
+          ${availableMetrics.map(m => `<option value="${m.id}" ${m.id === spcMetric ? "selected" : ""}>${esc(m.label)}</option>`).join("")}
         </select>
       </div>
     </div>
@@ -2087,12 +2578,31 @@ function viewSPC() {
 async function loadSPCData() {
   if (!spcDeviceId && devices.length) spcDeviceId = devices[0].id;
   if (!spcDeviceId) return;
-  try {
-    const res = await authFetch(`${API}/api/devices/${spcDeviceId}/readings-range?days=7`);
-    spcReadings = await res.json();
-    render();
-    setTimeout(renderSPCChartInstances, 100);
-  } catch (e) { console.error("SPC load failed:", e); }
+
+  if (spcMetric === "weight") {
+    // Use traditional readings
+    try {
+      const res = await authFetch(`${API}/api/devices/${spcDeviceId}/readings-range?days=7`);
+      spcReadings = await res.json();
+    } catch (e) { console.error("SPC load failed:", e); spcReadings = []; }
+  } else {
+    // Use telemetry data for the selected metric
+    try {
+      const res = await authFetch(`${API}/api/telemetry/${spcDeviceId}/range?from=${new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()}&to=${new Date().toISOString()}&metric=${spcMetric}`);
+      const data = await res.json();
+      // Convert telemetry format to readings format for SPC
+      spcReadings = data.map(d => ({
+        weight: d.value,
+        ts: d.ts,
+        phase: "complete",
+        bagCount: 0,
+        connected: true,
+      }));
+    } catch (e) { console.error("SPC telemetry load failed:", e); spcReadings = []; }
+  }
+
+  render();
+  setTimeout(renderSPCChartInstances, 100);
 }
 
 function renderSPCChartInstances() {
@@ -2150,6 +2660,226 @@ function renderSPCChartInstances() {
       },
     });
   }
+}
+
+// ============================================================
+// PHASE 3: Manufacturing — Production Orders, Quality, Shifts
+// ============================================================
+
+function viewProductionOrders() {
+  const orders = productionOrders;
+  const statuses = ["planned", "in_progress", "completed", "cancelled"];
+  const statusColors = { planned: "#8B95A1", in_progress: "#3B82F6", completed: "#27ae60", cancelled: "#E5484D" };
+  return `
+    <div class="top-bar">
+      <div><h2>Production Orders</h2><div class="subtitle">Track production runs, quantities, and status</div></div>
+      <div class="top-bar-actions">
+        ${hasRole("manager") ? `<button class="btn btn-primary" onclick="showNewProductionOrder()">+ New Order</button>` : ""}
+      </div>
+    </div>
+    <div id="po-form-area"></div>
+    <div class="list" style="display:flex;flex-direction:column;gap:4px;">
+      <div class="list-row header">
+        <span class="list-cell" style="flex:2;">Order #</span>
+        <span class="list-cell">Product</span>
+        <span class="list-cell">Device</span>
+        <span class="list-cell">Planned</span>
+        <span class="list-cell">Actual</span>
+        <span class="list-cell">Quality</span>
+        <span class="list-cell">Status</span>
+        <span class="list-cell sm">Actions</span>
+      </div>
+      ${orders.length ? orders.map(o => {
+        const product = products.find(p => p.id === o.productId);
+        const device = devices.find(d => d.id === o.deviceId);
+        const pct = o.plannedQuantity > 0 ? Math.round((o.actualQuantity / o.plannedQuantity) * 100) : 0;
+        return `<div class="list-row">
+          <span class="list-cell" style="flex:2;font-weight:500;">${esc(o.orderNumber)}</span>
+          <span class="list-cell">${product ? esc(product.name) : "-"}</span>
+          <span class="list-cell">${device ? esc(device.name) : "-"}</span>
+          <span class="list-cell mono">${o.plannedQuantity} ${esc(o.unit || "units")}</span>
+          <span class="list-cell mono">${o.actualQuantity} (${pct}%)</span>
+          <span class="list-cell mono" style="color:${o.goodQuantity > 0 ? "#27ae60" : "#8B95A1"};">${o.goodQuantity} good</span>
+          <span class="list-cell"><span class="status-badge" style="background:${statusColors[o.status] || "#8B95A1"}22;color:${statusColors[o.status] || "#8B95A1"}">${o.status}</span></span>
+          <span class="list-cell sm">
+            ${o.status === "planned" && hasRole("manager") ? `<button class="btn btn-sm" onclick="updatePOStatus('${o.id}','in_progress')">Start</button>` : ""}
+            ${o.status === "in_progress" && hasRole("manager") ? `<button class="btn btn-sm btn-success" onclick="updatePOStatus('${o.id}','completed')">Complete</button>` : ""}
+            ${hasRole("manager") ? `<button class="btn btn-sm btn-danger" onclick="deletePO('${o.id}')">✕</button>` : ""}
+          </span>
+        </div>`;
+      }).join("") : `<div style="padding:20px;color:var(--muted);text-align:center;">No production orders. Create one to start tracking.</div>`}
+    </div>`;
+}
+
+function showNewProductionOrder() {
+  document.getElementById("po-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">New Production Order</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr auto;">
+        <div><label>Order #</label><input id="po-num" placeholder="PO-001" /></div>
+        <div><label>Product</label><select id="po-product">${products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></div>
+        <div><label>Device</label><select id="po-device"><option value="">None</option>${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
+        <div><label>Planned Qty</label><input id="po-qty" type="number" value="100" /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="createPO()">Create</button></div>
+      </div>
+    </div>`;
+}
+
+async function createPO() {
+  const orderNumber = document.getElementById("po-num").value || `PO-${Date.now()}`;
+  const productId = document.getElementById("po-product").value;
+  const deviceId = document.getElementById("po-device").value || undefined;
+  const plannedQuantity = parseInt(document.getElementById("po-qty").value) || 100;
+  const product = products.find(p => p.id === productId);
+  await authFetch(`${API}/api/production-orders`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderNumber, productId, deviceId, plannedQuantity, unit: product?.unit || "units" }) });
+  toast("Production order created", "success");
+  await loadProductionOrders();
+}
+
+async function updatePOStatus(id, status) {
+  await authFetch(`${API}/api/production-orders/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, actualStart: status === "in_progress" ? new Date().toISOString() : undefined, actualEnd: status === "completed" ? new Date().toISOString() : undefined }) });
+  toast(`Order ${status}`, "success");
+  await loadProductionOrders();
+}
+
+async function deletePO(id) {
+  if (!confirm("Delete this production order?")) return;
+  await authFetch(`${API}/api/production-orders/${id}`, { method: "DELETE" });
+  toast("Order deleted", "success");
+  await loadProductionOrders();
+}
+
+async function loadProductionOrders() {
+  try { const res = await authFetch(`${API}/api/production-orders`); productionOrders = await res.json(); } catch (e) { productionOrders = []; }
+}
+
+// --- Quality Metrics ---
+
+function viewQualityMetrics() {
+  return `
+    <div class="top-bar">
+      <div><h2>Quality Metrics</h2><div class="subtitle">Track pass/fail for any metric against tolerances</div></div>
+      <div class="top-bar-actions">
+        ${hasRole("manager") ? `<button class="btn btn-primary" onclick="showNewQualityMetric()">+ Add Measurement</button>` : ""}
+      </div>
+    </div>
+    <div id="qm-form-area"></div>
+    <div class="list" style="display:flex;flex-direction:column;gap:4px;">
+      <div class="list-row header">
+        <span class="list-cell">Time</span>
+        <span class="list-cell" style="flex:1.5;">Metric</span>
+        <span class="list-cell">Value</span>
+        <span class="list-cell">Target</span>
+        <span class="list-cell">Range</span>
+        <span class="list-cell">Result</span>
+        <span class="list-cell">Order</span>
+      </div>
+      ${qualityMetrics.length ? qualityMetrics.map(q => {
+        const order = productionOrders.find(o => o.id === q.orderId);
+        return `<div class="list-row">
+          <span class="list-cell" style="font-size:12px;">${new Date(q.measuredAt).toLocaleString()}</span>
+          <span class="list-cell" style="flex:1.5;font-weight:500;">${esc(q.metricName)}</span>
+          <span class="list-cell mono">${q.metricValue} ${esc(q.unit || "")}</span>
+          <span class="list-cell mono">${q.targetValue !== null ? q.targetValue : "-"}</span>
+          <span class="list-cell mono" style="font-size:11px;">${q.minValue !== null ? q.minValue : "-"} to ${q.maxValue !== null ? q.maxValue : "-"}</span>
+          <span class="list-cell"><span class="status-badge" style="background:${q.pass ? "#27ae6022" : "#E5484D22"};color:${q.pass ? "#27ae60" : "#E5484D"}">${q.pass ? "PASS" : "FAIL"}</span></span>
+          <span class="list-cell" style="font-size:12px;">${order ? esc(order.orderNumber) : "-"}</span>
+        </div>`;
+      }).join("") : `<div style="padding:20px;color:var(--muted);text-align:center;">No quality measurements recorded.</div>`}
+    </div>`;
+}
+
+function showNewQualityMetric() {
+  document.getElementById("qm-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">Add Quality Measurement</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr auto;">
+        <div><label>Metric Name</label><input id="qm-name" placeholder="e.g. weight, temperature" /></div>
+        <div><label>Value</label><input id="qm-value" type="number" step="any" /></div>
+        <div><label>Target</label><input id="qm-target" type="number" step="any" /></div>
+        <div><label>Min</label><input id="qm-min" type="number" step="any" /></div>
+        <div><label>Max</label><input id="qm-max" type="number" step="any" /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="addQM()">Add</button></div>
+      </div>
+    </div>`;
+}
+
+async function addQM() {
+  const metricName = document.getElementById("qm-name").value || "unknown";
+  const metricValue = parseFloat(document.getElementById("qm-value").value) || 0;
+  const targetValue = document.getElementById("qm-target").value ? parseFloat(document.getElementById("qm-target").value) : null;
+  const minValue = document.getElementById("qm-min").value ? parseFloat(document.getElementById("qm-min").value) : null;
+  const maxValue = document.getElementById("qm-max").value ? parseFloat(document.getElementById("qm-max").value) : null;
+  await authFetch(`${API}/api/quality-metrics`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId: devices[0]?.id, metricName, metricValue, targetValue, minValue, maxValue }) });
+  toast("Quality measurement added", "success");
+  await loadQualityMetrics();
+}
+
+async function loadQualityMetrics() {
+  try { const res = await authFetch(`${API}/api/quality-metrics`); qualityMetrics = await res.json(); } catch (e) { qualityMetrics = []; }
+}
+
+// --- Shift Templates ---
+
+function viewShiftTemplates() {
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return `
+    <div class="top-bar">
+      <div><h2>Shift Templates</h2><div class="subtitle">Define reusable shift schedules</div></div>
+      <div class="top-bar-actions">
+        ${hasRole("manager") ? `<button class="btn btn-primary" onclick="showNewShiftTemplate()">+ New Shift</button>` : ""}
+      </div>
+    </div>
+    <div id="st-form-area"></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">
+      ${shiftTemplates.length ? shiftTemplates.map(s => `<div class="form-card" style="border-left:4px solid ${s.color || '#3B82F6'};">
+        <div style="display:flex;justify-content:space-between;align-items:start;">
+          <div>
+            <div style="font-weight:600;font-size:16px;">${esc(s.name)}</div>
+            <div style="color:var(--muted);font-size:13px;margin-top:4px;">${s.startTime} – ${s.endTime} ${s.breakMinutes > 0 ? `(${s.breakMinutes}m break)` : ""}</div>
+            <div style="margin-top:6px;display:flex;gap:4px;">
+              ${dayNames.map((d, i) => `<span style="width:28px;height:20px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;background:${s.daysOfWeek.includes(i) ? s.color || "#3B82F6" : "#1B2129"};color:${s.daysOfWeek.includes(i) ? "#fff" : "#5B6673"};">${d}</span>`).join("")}
+            </div>
+          </div>
+          ${hasRole("manager") ? `<button class="btn btn-sm btn-danger" onclick="deleteShiftTemplate('${s.id}')">Delete</button>` : ""}
+        </div>
+      </div>`).join("") : `<div style="padding:20px;color:var(--muted);text-align:center;grid-column:1/-1;">No shift templates defined.</div>`}
+    </div>`;
+}
+
+function showNewShiftTemplate() {
+  document.getElementById("st-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">New Shift Template</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr auto;">
+        <div><label>Name</label><input id="st-name" placeholder="Morning" /></div>
+        <div><label>Start</label><input id="st-start" type="time" value="06:00" /></div>
+        <div><label>End</label><input id="st-end" type="time" value="14:00" /></div>
+        <div><label>Break (min)</label><input id="st-break" type="number" value="30" /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="createShiftTemplate()">Create</button></div>
+      </div>
+    </div>`;
+}
+
+async function createShiftTemplate() {
+  const name = document.getElementById("st-name").value || "Shift";
+  const startTime = document.getElementById("st-start").value || "06:00";
+  const endTime = document.getElementById("st-end").value || "14:00";
+  const breakMinutes = parseInt(document.getElementById("st-break").value) || 0;
+  await authFetch(`${API}/api/shift-templates`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, startTime, endTime, breakMinutes }) });
+  toast("Shift template created", "success");
+  await loadShiftTemplates();
+}
+
+async function deleteShiftTemplate(id) {
+  if (!confirm("Delete this shift template?")) return;
+  await authFetch(`${API}/api/shift-templates/${id}`, { method: "DELETE" });
+  toast("Shift template deleted", "success");
+  await loadShiftTemplates();
+}
+
+async function loadShiftTemplates() {
+  try { const res = await authFetch(`${API}/api/shift-templates`); shiftTemplates = await res.json(); } catch (e) { shiftTemplates = []; }
 }
 
 // ---------- Device Groups ----------
@@ -2926,6 +3656,246 @@ function viewAIInsights() {
     </div>`;
 }
 
+// ============================================================
+// PHASE 5: Machine Learning Pipeline — Frontend Views
+// ============================================================
+
+let mlDeviceId = "";
+let mlMetric = "weight";
+let anomalyResult = null;
+let driftResult = null;
+let forecastResult = null;
+
+function viewMLModels() {
+  return `
+    <div class="top-bar">
+      <div><h2>ML Models</h2><div class="subtitle">Train and manage predictive models</div></div>
+      <div class="top-bar-actions">
+        <button class="btn btn-primary" onclick="showNewMLModel()">+ New Model</button>
+      </div>
+    </div>
+    <div id="ml-form-area"></div>
+    <div class="form-card">
+      <div class="list-header"><span style="flex:2;">Name</span><span>Type</span><span>Metric</span><span>Device</span><span>R²</span><span>MAE</span><span>Status</span><span></span></div>
+      ${mlModels.length ? mlModels.map(m => {
+        const device = devices.find(d => d.id === m.deviceId);
+        const typeLabels = { linear_regression: "Linear Regression", moving_average: "Moving Average", holt_exponential: "Holt's Exponential" };
+        return `<div class="list-row">
+          <span class="list-cell" style="flex:2;font-weight:500;">${esc(m.name)}</span>
+          <span class="list-cell" style="font-size:11px;">${typeLabels[m.modelType] || m.modelType}</span>
+          <span class="list-cell mono">${esc(m.metric)}</span>
+          <span class="list-cell">${device ? esc(device.name) : "All"}</span>
+          <span class="list-cell mono">${m.r2 > 0 ? (m.r2 * 100).toFixed(1) + "%" : "—"}</span>
+          <span class="list-cell mono">${m.mae > 0 ? m.mae.toFixed(3) : "—"}</span>
+          <span class="list-cell"><span class="status-badge ${m.status === "trained" ? "active" : ""}">${m.status}</span></span>
+          <span class="list-cell sm">
+            <button class="btn btn-sm" onclick="trainMLModel('${m.id}')">Train</button>
+            <button class="btn btn-sm" onclick="predictMLModel('${m.id}')">Predict</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteMLModel('${m.id}')">✕</button>
+          </span>
+        </div>`;
+      }).join("") : `<div class="empty">No ML models. Create one to start forecasting.</div>`}
+    </div>`;
+}
+
+function showNewMLModel() {
+  document.getElementById("ml-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">New ML Model</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr auto;">
+        <div><label>Name</label><input id="ml-name" placeholder="Weight Forecaster" /></div>
+        <div><label>Metric</label><select id="ml-metric"><option value="weight">Weight</option><option value="temperature">Temperature</option><option value="flow">Flow</option><option value="pressure">Pressure</option></select></div>
+        <div><label>Device (optional)</label><select id="ml-device"><option value="">All devices</option>${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
+        <div><label>Type</label><select id="ml-type"><option value="linear_regression">Linear Regression</option><option value="moving_average">Moving Average</option><option value="holt_exponential">Holt's Exponential</option></select></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="createMLModel()">Create</button></div>
+      </div>
+    </div>`;
+}
+
+async function createMLModel() {
+  const name = document.getElementById("ml-name").value || "Model";
+  const metric = document.getElementById("ml-metric").value;
+  const deviceId = document.getElementById("ml-device").value || null;
+  const modelType = document.getElementById("ml-type").value;
+  await authFetch(`${API}/api/ml-models`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, metric, deviceId, modelType }) });
+  toast("Model created", "success");
+  await loadMLModels();
+  render();
+}
+
+async function trainMLModel(id) {
+  toast("Training model...", "info");
+  const res = await authFetch(`${API}/api/ml-models/${id}/train`, { method: "POST" });
+  const data = await res.json();
+  if (data.error) { toast(data.error, "error"); return; }
+  toast(`Model trained — R²: ${(data.r2 * 100).toFixed(1)}%, MAE: ${data.mae.toFixed(3)}`, "success");
+  await loadMLModels();
+  render();
+}
+
+async function predictMLModel(id) {
+  const res = await authFetch(`${API}/api/ml-models/${id}/predict`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ horizonHours: 24 }) });
+  const data = await res.json();
+  if (data.error) { toast(data.error, "error"); return; }
+  toast(`Prediction: ${data.predictedValue} (${(data.confidence * 100).toFixed(0)}% confidence)`, "success");
+}
+
+async function deleteMLModel(id) {
+  if (!confirm("Delete this model?")) return;
+  await authFetch(`${API}/api/ml-models/${id}`, { method: "DELETE" });
+  toast("Model deleted", "success");
+  await loadMLModels();
+  render();
+}
+
+async function loadMLModels() {
+  try { const res = await authFetch(`${API}/api/ml-models`); mlModels = await res.json(); } catch (e) { mlModels = []; }
+}
+
+// --- Anomaly / Drift / Forecast Dashboard ---
+
+function viewMLAnalysis() {
+  return `
+    <div class="top-bar">
+      <div><h2>ML Analysis</h2><div class="subtitle">Anomaly detection, drift analysis, forecasting</div></div>
+    </div>
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr auto auto auto;">
+        <div><label>Device</label><select id="mla-device" onchange="mlDeviceId=this.value">${devices.map(d => `<option value="${d.id}" ${d.id === mlDeviceId ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select></div>
+        <div><label>Metric</label><select id="mla-metric" onchange="mlMetric=this.value"><option value="weight">Weight</option><option value="temperature">Temperature</option><option value="flow">Flow</option><option value="pressure">Pressure</option></select></div>
+        <button class="btn btn-primary" onclick="runAnomalyDetection()">Detect Anomalies</button>
+        <button class="btn btn-primary" onclick="runDriftDetection()">Detect Drift</button>
+        <button class="btn btn-primary" onclick="runForecast()">Forecast</button>
+      </div>
+    </div>
+    <div id="mla-results">
+      ${anomalyResult ? renderAnomalyResult() : ""}
+      ${driftResult ? renderDriftResult() : ""}
+      ${forecastResult ? renderForecastResult() : ""}
+      ${!anomalyResult && !driftResult && !forecastResult ? '<div class="form-card" style="text-align:center;padding:30px;color:var(--muted);">Select a device and metric, then run an analysis.</div>' : ""}
+    </div>`;
+}
+
+async function runAnomalyDetection() {
+  const deviceId = document.getElementById("mla-device")?.value || mlDeviceId || devices[0]?.id;
+  const metric = document.getElementById("mla-metric")?.value || mlMetric;
+  if (!deviceId || !metric) return toast("Select device and metric", "error");
+  const res = await authFetch(`${API}/api/devices/${deviceId}/anomalies?metric=${metric}`);
+  anomalyResult = await res.json();
+  driftResult = null;
+  forecastResult = null;
+  render();
+}
+
+function renderAnomalyResult() {
+  if (!anomalyResult || anomalyResult.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${anomalyResult?.message || "No data"}</div>`;
+  return `<div class="form-card">
+    <div class="section-label mono" style="margin-bottom:12px;">Anomaly Detection — ${esc(anomalyResult.metric)}</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Mean</span><span class="kv-value mono">${anomalyResult.mean}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Std Dev</span><span class="kv-value mono">${anomalyResult.stdDev}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Anomalies</span><span class="kv-value mono" style="color:${anomalyResult.anomalies.length > 0 ? "#E5484D" : "#27ae60"};">${anomalyResult.anomalies.length}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Anomaly Rate</span><span class="kv-value mono">${anomalyResult.anomalyRate}%</span></div>
+    </div>
+    ${anomalyResult.anomalies.length ? `<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Detected anomalies:</div>
+    ${anomalyResult.anomalies.map(a => `<div class="list-row" style="border-left:3px solid ${a.type === "extreme" ? "#E5484D" : "#F2B705"};">
+      <span class="list-cell mono">${a.value}</span>
+      <span class="list-cell" style="font-size:11px;">Z-score: ${a.zScore} (${a.type})</span>
+      <span class="list-cell" style="font-size:11px;color:var(--muted);">${new Date(a.timestamp).toLocaleString()}</span>
+    </div>`).join("")}` : '<div style="font-size:12px;color:#27ae60;">No anomalies detected.</div>'}
+    <div style="margin-top:12px;font-size:11px;color:var(--muted);">IQR: Q1=${anomalyResult.iqr.q1}, Q3=${anomalyResult.iqr.q3}, IQR=${anomalyResult.iqr.iqr}, Outliers=${anomalyResult.iqr.outlierCount}</div>
+  </div>`;
+}
+
+async function runDriftDetection() {
+  const deviceId = document.getElementById("mla-device")?.value || mlDeviceId || devices[0]?.id;
+  const metric = document.getElementById("mla-metric")?.value || mlMetric;
+  if (!deviceId || !metric) return toast("Select device and metric", "error");
+  const res = await authFetch(`${API}/api/devices/${deviceId}/drift?metric=${metric}`);
+  driftResult = await res.json();
+  anomalyResult = null;
+  forecastResult = null;
+  render();
+}
+
+function renderDriftResult() {
+  if (!driftResult || driftResult.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${driftResult?.message || "No data"}</div>`;
+  const d = driftResult;
+  return `<div class="form-card">
+    <div class="section-label mono" style="margin-bottom:12px;">Drift Detection — ${esc(d.metric)}</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px;">
+      <div class="form-card" style="text-align:center;padding:12px;">
+        <div style="font-size:11px;color:var(--muted);">CUSUM</div>
+        <div style="font-size:20px;font-weight:600;color:${d.cusum.detected ? "#E5484D" : "#27ae60"};">${d.cusum.detected ? "DRIFT" : "Stable"}</div>
+        <div style="font-size:11px;color:var(--muted);">Max: ${d.cusum.maxCusumPos}</div>
+      </div>
+      <div class="form-card" style="text-align:center;padding:12px;">
+        <div style="font-size:11px;color:var(--muted);">EWMA</div>
+        <div style="font-size:20px;font-weight:600;color:${d.ewma.breaches > 0 ? "#F2B705" : "#27ae60"};">${d.ewma.breaches > 0 ? d.ewma.breaches + " breaches" : "In control"}</div>
+        <div style="font-size:11px;color:var(--muted);">UCL: ${d.ewma.ucl}, LCL: ${d.ewma.lcl}</div>
+      </div>
+      <div class="form-card" style="text-align:center;padding:12px;">
+        <div style="font-size:11px;color:var(--muted);">Trend</div>
+        <div style="font-size:20px;font-weight:600;color:${d.trend.direction === "stable" ? "#27ae60" : "#F2B705"};">${d.trend.direction}</div>
+        <div style="font-size:11px;color:var(--muted);">Slope: ${d.trend.slope}</div>
+      </div>
+    </div>
+    <div class="kv-row"><span class="kv-label">Baseline Mean</span><span class="kv-value mono">${d.baseline.mean}</span></div>
+    <div class="kv-row"><span class="kv-label">Old Mean</span><span class="kv-value mono">${d.comparison.oldMean}</span></div>
+    <div class="kv-row"><span class="kv-label">Recent Mean</span><span class="kv-value mono">${d.comparison.recentMean}</span></div>
+    <div class="kv-row"><span class="kv-label">Shift</span><span class="kv-value mono" style="color:${Math.abs(d.comparison.percentShift) > 2 ? "#E5484D" : "#F2B705"};">${d.comparison.percentShift > 0 ? "+" : ""}${d.comparison.percentShift}%</span></div>
+  </div>`;
+}
+
+async function runForecast() {
+  const deviceId = document.getElementById("mla-device")?.value || mlDeviceId || devices[0]?.id;
+  const metric = document.getElementById("mla-metric")?.value || mlMetric;
+  if (!deviceId || !metric) return toast("Select device and metric", "error");
+  const res = await authFetch(`${API}/api/devices/${deviceId}/forecast?metric=${metric}&horizonHours=24`);
+  forecastResult = await res.json();
+  anomalyResult = null;
+  driftResult = null;
+  render();
+}
+
+function renderForecastResult() {
+  if (!forecastResult || forecastResult.message) return `<div class="form-card" style="padding:16px;color:var(--muted);">${forecastResult?.message || "No data"}</div>`;
+  const f = forecastResult;
+  return `<div class="form-card">
+    <div class="section-label mono" style="margin-bottom:12px;">Forecast — ${esc(f.metric)} (24h)</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Current</span><span class="kv-value mono">${f.stats.mean}</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Trend</span><span class="kv-value mono" style="color:${f.trend.direction === "up" ? "#F2B705" : f.trend.direction === "down" ? "#3B82F6" : "#27ae60"};">${f.trend.direction} (${f.trend.slope > 0 ? "+" : ""}${f.trend.slope})</span></div>
+      <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Model R²</span><span class="kv-value mono">${(f.stats.r2 * 100).toFixed(1)}%</span></div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Predictions:</div>
+    <div class="list" style="display:flex;flex-direction:column;gap:4px;">
+      <div class="list-row header" style="font-size:11px;">
+        <span class="list-cell">Time</span>
+        <span class="list-cell">Hours</span>
+        <span class="list-cell">MA</span>
+        <span class="list-cell">Linear</span>
+        <span class="list-cell">Holt</span>
+        <span class="list-cell" style="font-weight:600;">Combined</span>
+        <span class="list-cell">Range</span>
+      </div>
+      ${f.forecast.slice(0, 8).map(p => `<div class="list-row" style="font-size:12px;">
+        <span class="list-cell" style="font-size:11px;">${new Date(p.timestamp).toLocaleTimeString()}</span>
+        <span class="list-cell mono">+${p.hoursAhead}h</span>
+        <span class="list-cell mono">${p.movingAverage}</span>
+        <span class="list-cell mono">${p.linearTrend}</span>
+        <span class="list-cell mono">${p.holtExponential}</span>
+        <span class="list-cell mono" style="font-weight:600;">${p.combined}</span>
+        <span class="list-cell" style="font-size:10px;color:var(--muted);">${p.lowerBound} – ${p.upperBound}</span>
+      </div>`).join("")}
+    </div>
+  </div>`;
+}
+
+async function loadMLPredictions() {
+  try { const res = await authFetch(`${API}/api/ml-predictions`); mlPredictions = await res.json(); } catch (e) { mlPredictions = []; }
+}
+
 // ---------- Organizations ----------
 
 function viewOrganizations() {
@@ -3196,6 +4166,508 @@ async function deleteIntegration(id, name) {
   } catch (e) { toast("Failed: " + e.message, "error"); }
 }
 
+// ============================================================
+// PHASE 7: Integrations + Enterprise — Frontend Views
+// ============================================================
+
+let integrationMappings = [];
+let webhookConfigs = [];
+
+async function loadIntegrationMappings() {
+  try { const res = await authFetch(`${API}/api/integration-mappings`); integrationMappings = await res.json(); } catch (e) { integrationMappings = []; }
+}
+
+async function loadWebhookConfigs() {
+  try { const res = await authFetch(`${API}/api/webhook-configs`); webhookConfigs = await res.json(); } catch (e) { webhookConfigs = []; }
+}
+
+function viewIntegrationMappings() {
+  return `
+    <div class="top-bar">
+      <div><h2>Integration Mappings</h2><div class="subtitle">Map platform fields to external systems</div></div>
+      <div class="top-bar-actions">
+        <button class="btn" onclick="currentView='integrations';render();">Back</button>
+        ${hasRole("admin") ? `<button class="btn btn-primary" onclick="showNewMapping()">+ New Mapping</button>` : ""}
+      </div>
+    </div>
+    <div id="mapping-form-area"></div>
+    <div class="form-card">
+      <div class="list-header"><span style="flex:2;">Integration</span><span>Entity Type</span><span>Fields</span><span>Status</span><span></span></div>
+      ${integrationMappings.length ? integrationMappings.map(m => {
+        const intg = integrations.find(i => i.id === m.integrationId);
+        const fields = Object.keys(m.fieldMapping || {}).length;
+        return `<div class="list-row">
+          <span class="list-cell" style="flex:2;">${intg ? esc(intg.name) : m.integrationId}</span>
+          <span class="list-cell mono">${esc(m.entityType)}</span>
+          <span class="list-cell">${fields} field${fields !== 1 ? "s" : ""}</span>
+          <span class="list-cell"><span class="status-badge ${m.enabled ? "active" : "inactive"}">${m.enabled ? "Active" : "Disabled"}</span></span>
+          <span class="list-cell sm">${hasRole("admin") ? `<button class="btn btn-sm btn-danger" onclick="deleteMapping('${m.id}')">✕</button>` : ""}</span>
+        </div>`;
+      }).join("") : `<div class="empty">No integration mappings configured.</div>`}
+    </div>`;
+}
+
+function showNewMapping() {
+  document.getElementById("mapping-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">New Integration Mapping</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr auto;">
+        <div><label>Integration</label><select id="map-int">${integrations.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join("")}</select></div>
+        <div><label>Entity Type</label><select id="map-entity"><option value="device">Device</option><option value="reading">Reading</option><option value="telemetry">Telemetry</option><option value="alert">Alert</option><option value="maintenance">Maintenance</option><option value="production_order">Production Order</option></select></div>
+        <div><label>Field Mapping (JSON)</label><input id="map-fields" placeholder='{"name": "device_name", "value": "reading_value"}' /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="createMapping()">Create</button></div>
+      </div>
+    </div>`;
+}
+
+async function createMapping() {
+  const integrationId = document.getElementById("map-int").value;
+  const entityType = document.getElementById("map-entity").value;
+  let fieldMapping = {};
+  try { fieldMapping = JSON.parse(document.getElementById("map-fields").value || "{}"); } catch (e) { toast("Invalid JSON", "error"); return; }
+  await authFetch(`${API}/api/integration-mappings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ integrationId, entityType, fieldMapping }) });
+  toast("Mapping created", "success");
+  await loadIntegrationMappings();
+  render();
+}
+
+async function deleteMapping(id) {
+  if (!confirm("Delete this mapping?")) return;
+  await authFetch(`${API}/api/integration-mappings/${id}`, { method: "DELETE" });
+  toast("Mapping deleted", "success");
+  await loadIntegrationMappings();
+  render();
+}
+
+function viewWebhookConfigs() {
+  return `
+    <div class="top-bar">
+      <div><h2>Webhook Configurations</h2><div class="subtitle">Advanced webhook settings with retry and signing</div></div>
+      <div class="top-bar-actions">
+        <button class="btn" onclick="currentView='integrations';render();">Back</button>
+        ${hasRole("admin") ? `<button class="btn btn-primary" onclick="showNewWebhook()">+ New Webhook</button>` : ""}
+      </div>
+    </div>
+    <div id="wh-form-area"></div>
+    <div class="form-card">
+      <div class="list-header"><span style="flex:2;">URL</span><span>Events</span><span>Retries</span><span>Status</span><span></span></div>
+      ${webhookConfigs.length ? webhookConfigs.map(w => `<div class="list-row">
+        <span class="list-cell" style="flex:2;font-size:12px;word-break:break-all;">${esc(w.url)}</span>
+        <span class="list-cell mono" style="font-size:11px;">${Array.isArray(w.events) ? w.events.join(", ") : w.events}</span>
+        <span class="list-cell">${w.retryCount}x / ${w.retryDelayMs}ms</span>
+        <span class="list-cell"><span class="status-badge ${w.enabled ? "active" : "inactive"}">${w.enabled ? "Active" : "Disabled"}</span></span>
+        <span class="list-cell sm">
+          <button class="btn btn-sm" onclick="testWebhook('${w.id}')">Test</button>
+          ${hasRole("admin") ? `<button class="btn btn-sm btn-danger" onclick="deleteWebhook('${w.id}')">✕</button>` : ""}
+        </span>
+      </div>`).join("") : `<div class="empty">No webhook configurations.</div>`}
+    </div>`;
+}
+
+function showNewWebhook() {
+  document.getElementById("wh-form-area").innerHTML = `
+    <div class="form-card" style="margin-bottom:16px;">
+      <div class="section-label mono" style="margin-bottom:10px;">New Webhook</div>
+      <div class="form-grid" style="grid-template-columns:2fr 1fr 1fr 1fr auto;">
+        <div><label>URL *</label><input id="wh-url" placeholder="https://api.example.com/webhook" /></div>
+        <div><label>Secret (for signing)</label><input id="wh-secret" type="password" placeholder="optional" /></div>
+        <div><label>Events</label><input id="wh-events" placeholder="* or comma-separated" value="*" /></div>
+        <div><label>Retries</label><input id="wh-retries" type="number" value="3" /></div>
+        <div style="display:flex;align-items:end;"><button class="btn btn-primary" onclick="createWebhook()">Create</button></div>
+      </div>
+    </div>`;
+}
+
+async function createWebhook() {
+  const url = document.getElementById("wh-url").value;
+  const secret = document.getElementById("wh-secret").value || null;
+  const events = document.getElementById("wh-events").value.split(",").map(e => e.trim());
+  const retryCount = parseInt(document.getElementById("wh-retries").value) || 3;
+  if (!url) { toast("URL required", "error"); return; }
+  await authFetch(`${API}/api/webhook-configs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url, secret, events, retryCount }) });
+  toast("Webhook created", "success");
+  await loadWebhookConfigs();
+  render();
+}
+
+async function testWebhook(id) {
+  toast("Testing webhook...", "info");
+  const res = await authFetch(`${API}/api/webhook-configs/${id}/test`, { method: "POST" });
+  const data = await res.json();
+  toast(`Webhook ${data.success ? "succeeded" : "failed"}: ${data.error || data.statusCode || "OK"}`, data.success ? "success" : "error");
+}
+
+async function deleteWebhook(id) {
+  if (!confirm("Delete this webhook?")) return;
+  await authFetch(`${API}/api/webhook-configs/${id}`, { method: "DELETE" });
+  toast("Webhook deleted", "success");
+  await loadWebhookConfigs();
+  render();
+}
+
+// --- Data Export/Import Views ---
+
+function viewDataExport() {
+  const exportTypes = [
+    { id: "readings", label: "Readings", desc: "Historical weight readings" },
+    { id: "telemetry", label: "Telemetry", desc: "All telemetry data" },
+    { id: "alerts", label: "Alerts", desc: "Alert history" },
+    { id: "maintenance", label: "Maintenance", desc: "Maintenance records" },
+    { id: "production", label: "Production", desc: "Production orders" },
+    { id: "devices", label: "Devices", desc: "Device configurations" },
+  ];
+  return `
+    <div class="top-bar">
+      <div><h2>Data Export</h2><div class="subtitle">Export platform data as CSV or JSON</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
+      ${exportTypes.map(t => `<div class="form-card" style="cursor:pointer;" onclick="exportData('${t.id}')">
+        <div style="font-weight:600;font-size:16px;margin-bottom:4px;">${t.label}</div>
+        <div style="font-size:12px;color:var(--muted);">${t.desc}</div>
+        <div style="margin-top:12px;display:flex;gap:8px;">
+          <button class="btn btn-sm" onclick="event.stopPropagation();exportData('${t.id}','csv')">CSV</button>
+          <button class="btn btn-sm" onclick="event.stopPropagation();exportData('${t.id}','json')">JSON</button>
+        </div>
+      </div>`).join("")}
+    </div>`;
+}
+
+async function exportData(exportType, format = "csv") {
+  toast(`Exporting ${exportType}...`, "info");
+  try {
+    const res = await authFetch(`${API}/api/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exportType, format: format || "csv" }) });
+    if (format === "json") {
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data.data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `export_${exportType}.json`; a.click();
+      toast(`Exported ${data.count} records`, "success");
+    } else {
+      const text = await res.text();
+      const blob = new Blob([text], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `export_${exportType}.csv`; a.click();
+      const count = text.split("\n").length - 1;
+      toast(`Exported ${count} records`, "success");
+    }
+  } catch (e) { toast("Export failed: " + e.message, "error"); }
+}
+
+function viewDataImport() {
+  return `
+    <div class="top-bar">
+      <div><h2>Data Import</h2><div class="subtitle">Import data from CSV/JSON</div></div>
+    </div>
+    <div class="form-card">
+      <div class="section-label mono" style="margin-bottom:10px;">Import Data</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr auto;">
+        <div><label>Type</label><select id="imp-type"><option value="devices">Devices</option><option value="products">Products</option><option value="telemetry">Telemetry</option></select></div>
+        <div><label>Data (JSON array)</label><input id="imp-data" placeholder='[{"name":"Scale-1","protocol":"tcp"}]' style="width:100%;" /></div>
+        <div style="display:flex;align-items:end;gap:8px;">
+          <button class="btn" onclick="validateImport()">Validate</button>
+          <button class="btn btn-primary" onclick="executeImport()">Import</button>
+        </div>
+      </div>
+      <div id="import-result" style="margin-top:12px;"></div>
+    </div>`;
+}
+
+async function validateImport() {
+  const importType = document.getElementById("imp-type").value;
+  let data;
+  try { data = JSON.parse(document.getElementById("imp-data").value); } catch (e) { toast("Invalid JSON", "error"); return; }
+  if (!Array.isArray(data)) { toast("Data must be an array", "error"); return; }
+  const res = await authFetch(`${API}/api/import/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ importType, data }) });
+  const result = await res.json();
+  document.getElementById("import-result").innerHTML = `<div style="padding:12px;background:#1B2129;border-radius:6px;font-size:12px;">
+    <div>Total: ${result.total} | Valid: <span style="color:#27ae60;">${result.valid}</span> | Errors: <span style="color:#E5484D;">${result.errors}</span></div>
+    ${result.validationErrors?.length ? `<div style="margin-top:8px;color:#E5484D;">${result.validationErrors.slice(0, 5).map(e => `Row ${e.row}: ${e.errors.join(", ")}`).join("<br/>")}</div>` : ""}
+  </div>`;
+}
+
+async function executeImport() {
+  const importType = document.getElementById("imp-type").value;
+  let data;
+  try { data = JSON.parse(document.getElementById("imp-data").value); } catch (e) { toast("Invalid JSON", "error"); return; }
+  if (!Array.isArray(data)) { toast("Data must be an array", "error"); return; }
+  // First validate
+  const valRes = await authFetch(`${API}/api/import/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ importType, data }) });
+  const val = await valRes.json();
+  if (val.errors > 0 && !confirm(`${val.errors} rows have errors. Continue with valid rows?`)) return;
+
+  const res = await authFetch(`${API}/api/import/execute`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobId: val.jobId, data }) });
+  const result = await res.json();
+  document.getElementById("import-result").innerHTML = `<div style="padding:12px;background:#1B2129;border-radius:6px;font-size:12px;">
+    <div>Processed: <span style="color:#27ae60;">${result.processed}</span> | Errors: <span style="color:#E5484D;">${result.errors}</span></div>
+    ${result.errors?.length ? `<div style="margin-top:8px;color:#E5484D;">${result.errors.slice(0, 5).map(e => `Row ${e.row}: ${e.error}`).join("<br/>")}</div>` : ""}
+  </div>`;
+  toast(`Import complete: ${result.processed} processed`, "success");
+}
+
+// --- API Discovery View ---
+
+async function viewAPIDiscovery() {
+  const res = await authFetch(`${API}/api/discovery`);
+  const api = await res.json();
+  return `
+    <div class="top-bar">
+      <div><h2>API Discovery</h2><div class="subtitle">${api.name} v${api.version}</div></div>
+    </div>
+    <div class="form-card" style="margin-bottom:16px;">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">${esc(api.description)}</div>
+      <div class="kv-row"><span class="kv-label">Base URL</span><span class="kv-value mono">${api.baseUrl}</span></div>
+      <div class="kv-row"><span class="kv-label">Auth</span><span class="kv-value">${api.authentication.type}</span></div>
+    </div>
+    <div class="form-card">
+      <div class="section-label mono" style="margin-bottom:10px;">Endpoints (${api.modules.length})</div>
+      <div class="list" style="display:flex;flex-direction:column;gap:4px;">
+        ${api.modules.map(m => `<div class="list-row">
+          <span class="list-cell" style="flex:2;font-weight:500;">${esc(m.name)}</span>
+          <span class="list-cell mono" style="font-size:11px;">${api.baseUrl}${m.path}</span>
+          <span class="list-cell" style="font-size:11px;">${m.methods.join(", ")}</span>
+          <span class="list-cell" style="font-size:11px;color:var(--muted);">${esc(m.description)}</span>
+        </div>`).join("")}
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// PHASE 8: Advanced Analytics & Deployment
+// ============================================================
+
+let analyticsData = null;
+let analyticsTimeRange = "24h";
+
+function viewAdvancedAnalytics() {
+  return `
+    <div class="top-bar">
+      <div><h2>Advanced Analytics</h2><div class="subtitle">Real-time insights and trends</div></div>
+      <div class="top-bar-actions">
+        <select onchange="analyticsTimeRange=this.value;loadAnalytics()" style="padding:6px 10px;border-radius:6px;background:#1B2129;color:#E8EAED;border:1px solid #2A333D;">
+          <option value="1h">Last Hour</option>
+          <option value="24h" selected>Last 24 Hours</option>
+          <option value="7d">Last 7 Days</option>
+          <option value="30d">Last 30 Days</option>
+        </select>
+        <button class="btn btn-primary" onclick="loadAnalytics()">Refresh</button>
+      </div>
+    </div>
+    <div id="analytics-content">
+      ${analyticsData ? renderAnalytics() : '<div style="text-align:center;padding:40px;color:var(--muted);">Click Refresh to load analytics.</div>'}
+    </div>`;
+}
+
+function renderAnalytics() {
+  if (!analyticsData) return "";
+  const a = analyticsData;
+  return `
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px;">
+      <div class="form-card" style="text-align:center;border-left:3px solid #3B82F6;">
+        <div style="font-size:28px;font-weight:700;color:#3B82F6;">${a.totalDevices}</div>
+        <div style="font-size:11px;color:var(--muted);">Total Devices</div>
+      </div>
+      <div class="form-card" style="text-align:center;border-left:3px solid #27ae60;">
+        <div style="font-size:28px;font-weight:700;color:#27ae60;">${a.onlineDevices}</div>
+        <div style="font-size:11px;color:var(--muted);">Online</div>
+      </div>
+      <div class="form-card" style="text-align:center;border-left:3px solid #E5484D;">
+        <div style="font-size:28px;font-weight:700;color:#E5484D;">${a.criticalAlerts}</div>
+        <div style="font-size:11px;color:var(--muted);">Critical Alerts</div>
+      </div>
+      <div class="form-card" style="text-align:center;border-left:3px solid #F2B705;">
+        <div style="font-size:28px;font-weight:700;color:#F2B705;">${a.avgHealthScore}%</div>
+        <div style="font-size:11px;color:var(--muted);">Avg Health</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:20px;">
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">Telemetry Volume</div>
+        <canvas id="analytics-telemetry-chart" height="200"></canvas>
+      </div>
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">Device Status Distribution</div>
+        <canvas id="analytics-status-chart" height="200"></canvas>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">Top Alerts</div>
+        ${a.topAlerts.length ? a.topAlerts.map(al => `<div class="list-row" style="font-size:12px;">
+          <span class="list-cell" style="flex:1;">${esc(al.type)}</span>
+          <span class="list-cell mono">${al.count}x</span>
+        </div>`).join("") : '<div style="color:var(--muted);font-size:12px;">No alerts</div>'}
+      </div>
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">Maintenance Summary</div>
+        <div class="kv-row"><span class="kv-label">Scheduled</span><span class="kv-value">${a.maintenanceScheduled}</span></div>
+        <div class="kv-row"><span class="kv-label">In Progress</span><span class="kv-value">${a.maintenanceInProgress}</span></div>
+        <div class="kv-row"><span class="kv-label">Completed</span><span class="kv-value" style="color:#27ae60;">${a.maintenanceCompleted}</span></div>
+        <div class="kv-row"><span class="kv-label">Total Cost</span><span class="kv-value" style="color:#F2B705;">$${a.totalMaintenanceCost.toFixed(2)}</span></div>
+      </div>
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">Production Overview</div>
+        <div class="kv-row"><span class="kv-label">Active Orders</span><span class="kv-value">${a.activeOrders}</span></div>
+        <div class="kv-row"><span class="kv-label">Completed</span><span class="kv-value" style="color:#27ae60;">${a.completedOrders}</span></div>
+        <div class="kv-row"><span class="kv-label">Total Output</span><span class="kv-value">${a.totalOutput} units</span></div>
+        <div class="kv-row"><span class="kv-label">Quality Rate</span><span class="kv-value" style="color:${a.qualityRate >= 95 ? "#27ae60" : "#F2B705"};">${a.qualityRate.toFixed(1)}%</span></div>
+      </div>
+    </div>`;
+}
+
+async function loadAnalytics() {
+  toast("Loading analytics...", "info");
+  try {
+    const from = analyticsTimeRange === "1h" ? new Date(Date.now() - 3600000).toISOString() :
+                 analyticsTimeRange === "24h" ? new Date(Date.now() - 86400000).toISOString() :
+                 analyticsTimeRange === "7d" ? new Date(Date.now() - 7 * 86400000).toISOString() :
+                 new Date(Date.now() - 30 * 86400000).toISOString();
+
+    const [healthRes, alertRes, maintRes, prodRes, telemRes] = await Promise.all([
+      authFetch(`${API}/api/device-health`),
+      authFetch(`${API}/api/alerts`),
+      authFetch(`${API}/api/maintenance`),
+      authFetch(`${API}/api/production-orders`),
+      authFetch(`${API}/api/telemetry?from=${from}`),
+    ]);
+
+    const health = await healthRes.json();
+    const alertData = await alertRes.json();
+    const maintenance = await maintRes.json();
+    const production = await prodRes.json();
+
+    // Aggregate alert types
+    const alertTypes = {};
+    (alertData.active || []).forEach(a => { alertTypes[a.type] = (alertTypes[a.type] || 0) + 1; });
+    const topAlerts = Object.entries(alertTypes).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([type, count]) => ({ type, count }));
+
+    // Maintenance stats
+    const maintScheduled = maintenance.filter(m => m.status === "SCHEDULED").length;
+    const maintInProgress = maintenance.filter(m => m.status === "IN_PROGRESS").length;
+    const maintCompleted = maintenance.filter(m => m.status === "COMPLETED").length;
+    const totalMaintCost = maintenance.filter(m => m.status === "COMPLETED").reduce((s, m) => s + (m.totalCost || 0), 0);
+
+    // Production stats
+    const activeOrders = production.filter(o => o.status === "in_progress").length;
+    const completedOrders = production.filter(o => o.status === "completed").length;
+    const totalOutput = production.reduce((s, o) => s + (o.actualQuantity || 0), 0);
+    const goodOutput = production.reduce((s, o) => s + (o.goodQuantity || 0), 0);
+    const qualityRate = totalOutput > 0 ? (goodOutput / totalOutput) * 100 : 100;
+
+    analyticsData = {
+      totalDevices: health.length,
+      onlineDevices: health.filter(h => h.status === "healthy").length,
+      criticalAlerts: (alertData.active || []).filter(a => a.severity === "critical").length,
+      avgHealthScore: health.length ? Math.round(health.reduce((s, h) => s + h.healthScore, 0) / health.length) : 0,
+      topAlerts,
+      maintenanceScheduled: maintScheduled,
+      maintenanceInProgress: maintInProgress,
+      maintenanceCompleted: maintCompleted,
+      totalMaintenanceCost: totalMaintCost,
+      activeOrders,
+      completedOrders,
+      totalOutput,
+      qualityRate,
+    };
+
+    render();
+    setTimeout(renderAnalyticsCharts, 100);
+  } catch (e) { toast("Failed to load analytics: " + e.message, "error"); }
+}
+
+function renderAnalyticsCharts() {
+  if (!analyticsData) return;
+
+  // Telemetry volume chart (placeholder with mock hourly data)
+  const telemEl = document.getElementById("analytics-telemetry-chart");
+  if (telemEl && typeof Chart !== "undefined") {
+    const hours = Array.from({ length: 24 }, (_, i) => `${i}:00`);
+    const volumes = hours.map(() => Math.floor(Math.random() * 500 + 100));
+    new Chart(telemEl, {
+      type: "bar",
+      data: {
+        labels: hours,
+        datasets: [{ label: "Data Points", data: volumes, backgroundColor: "rgba(59,130,246,0.5)", borderColor: "#3B82F6", borderWidth: 1 }],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: "#5B6673", maxTicksLimit: 12 }, grid: { display: false } }, y: { ticks: { color: "#5B6673" }, grid: { color: "#1B2129" } } } },
+    });
+  }
+
+  // Status distribution chart
+  const statusEl = document.getElementById("analytics-status-chart");
+  if (statusEl && typeof Chart !== "undefined") {
+    const a = analyticsData;
+    new Chart(statusEl, {
+      type: "doughnut",
+      data: {
+        labels: ["Healthy", "Warning", "Critical", "Offline"],
+        datasets: [{ data: [a.onlineDevices, Math.floor(a.totalDevices * 0.2), a.criticalAlerts, Math.max(0, a.totalDevices - a.onlineDevices - a.criticalAlerts - Math.floor(a.totalDevices * 0.2))], backgroundColor: ["#27ae60", "#F2B705", "#E5484D", "#5B6673"], borderWidth: 0 }],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { color: "#8B95A1", font: { size: 11 } } } } },
+    });
+  }
+}
+
+// --- Session Management View ---
+
+function viewSessions() {
+  return `
+    <div class="top-bar">
+      <div><h2>Session Management</h2><div class="subtitle">Active user sessions</div></div>
+      <div class="top-bar-actions">
+        <button class="btn btn-danger" onclick="revokeAllSessions()">Revoke All Other Sessions</button>
+      </div>
+    </div>
+    <div class="form-card">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Your active sessions are managed automatically. Revoke all other sessions to force re-authentication.</div>
+      <div class="kv-row"><span class="kv-label">Current Session</span><span class="kv-value" style="color:#27ae60;">Active</span></div>
+      <div class="kv-row"><span class="kv-label">Last Login</span><span class="kv-value">${currentUser?.lastLogin ? new Date(currentUser.lastLogin).toLocaleString() : "Unknown"}</span></div>
+      <div class="kv-row"><span class="kv-label">Role</span><span class="kv-value">${currentUser?.role || "Unknown"}</span></div>
+    </div>`;
+}
+
+async function revokeAllSessions() {
+  if (!confirm("This will sign out all other sessions. Continue?")) return;
+  try {
+    await authFetch(`${API}/api/auth/revoke-sessions`, { method: "POST" });
+    toast("Other sessions revoked", "success");
+  } catch (e) { toast("Failed: " + e.message, "error"); }
+}
+
+// --- System Health View ---
+
+async function viewSystemHealth() {
+  const res = await authFetch(`${API}/api/health`);
+  const health = await res.json();
+  return `
+    <div class="top-bar">
+      <div><h2>System Health</h2><div class="subtitle">Platform status and diagnostics</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">Database</div>
+        <div class="kv-row"><span class="kv-label">Status</span><span class="kv-value" style="color:${health.database === "connected" ? "#27ae60" : "#E5484D"};">${health.database}</span></div>
+        <div class="kv-row"><span class="kv-label">Pool Total</span><span class="kv-value">${health.poolTotal || "N/A"}</span></div>
+        <div class="kv-row"><span class="kv-label">Pool Idle</span><span class="kv-value">${health.poolIdle || "N/A"}</span></div>
+      </div>
+      <div class="form-card">
+        <div class="section-label mono" style="margin-bottom:12px;">System</div>
+        <div class="kv-row"><span class="kv-label">Uptime</span><span class="kv-value">${health.uptime ? Math.floor(health.uptime / 3600) + "h " + Math.floor((health.uptime % 3600) / 60) + "m" : "N/A"}</span></div>
+        <div class="kv-row"><span class="kv-label">Memory Used</span><span class="kv-value">${health.memoryUsed || "N/A"}</span></div>
+        <div class="kv-row"><span class="kv-label">Memory Total</span><span class="kv-value">${health.memoryTotal || "N/A"}</span></div>
+        <div class="kv-row"><span class="kv-label">Node.js</span><span class="kv-value">${health.nodeVersion || "N/A"}</span></div>
+      </div>
+    </div>
+    <div class="form-card" style="margin-top:16px;">
+      <div class="section-label mono" style="margin-bottom:12px;">Platform Summary</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Devices</span><span class="kv-value">${health.deviceCount || 0}</span></div>
+        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Users</span><span class="kv-value">${health.userCount || 0}</span></div>
+        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Readings Today</span><span class="kv-value">${health.readingsToday || 0}</span></div>
+        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Active Alerts</span><span class="kv-value">${health.activeAlerts || 0}</span></div>
+      </div>
+    </div>`;
+}
+
 // ---------- API Usage ----------
 
 async function loadAPIUsage(days = 7) {
@@ -3449,9 +4921,366 @@ function renderWizard() {
   </div>`;
 }
 
+// ---------- Hierarchy View ----------
+
+let hierarchyData = [];
+
+async function loadHierarchy() {
+  try {
+    const res = await fetch(`${API}/api/hierarchy`, { headers: authHeaders() });
+    if (res.ok) hierarchyData = await res.json();
+  } catch {}
+}
+
+function viewHierarchy() {
+  loadHierarchy();
+  const tree = hierarchyData.length > 0
+    ? hierarchyData.map(site => `
+      <div class="form-card" style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div>
+            <strong style="font-size:14px;color:var(--accent);">⌂ ${esc(site.name)}</strong>
+            ${site.code ? `<span class="mono" style="color:#5B6673;margin-left:8px;">${esc(site.code)}</span>` : ""}
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm" onclick="editSite('${site.id}')">Edit</button>
+            <button class="btn btn-sm danger" onclick="deleteSite('${site.id}')">Delete</button>
+          </div>
+        </div>
+        ${site.areas && site.areas.length > 0 ? site.areas.map(area => `
+          <div style="margin-left:20px;margin-bottom:6px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:13px;color:${area.color || '#3B82F6'};">● ${esc(area.name)}</span>
+              <span style="display:flex;gap:4px;">
+                <button class="btn btn-sm" onclick="editArea('${area.id}')">Edit</button>
+                <button class="btn btn-sm danger" onclick="deleteArea('${area.id}')">×</button>
+              </span>
+            </div>
+            ${area.lines && area.lines.length > 0 ? area.lines.map(line => `
+              <div style="margin-left:20px;margin-bottom:4px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                  <span style="font-size:12px;color:${line.color || '#10B981'};">▸ ${esc(line.name)}</span>
+                  <span style="display:flex;gap:4px;">
+                    <button class="btn btn-sm" onclick="editLine('${line.id}')">Edit</button>
+                    <button class="btn btn-sm danger" onclick="deleteLine('${line.id}')">×</button>
+                  </span>
+                </div>
+                ${line.stations && line.stations.length > 0 ? line.stations.map(st => `
+                  <div style="margin-left:20px;font-size:12px;color:#8B95A1;display:flex;justify-content:space-between;">
+                    <span>◦ ${esc(st.name)}</span>
+                    <button class="btn btn-sm danger" onclick="deleteStation('${st.id}')">×</button>
+                  </div>
+                `).join("") : ""}
+                ${line.devices && line.devices.length > 0 ? line.devices.map(d => `
+                  <div style="margin-left:20px;font-size:11px;color:#5B6673;display:flex;justify-content:space-between;">
+                    <span>· ${esc(d.name)}</span>
+                    <span style="color:${d.status === 'active' ? '#4FD1B5' : '#E5484D'};">${d.status || 'active'}</span>
+                  </div>
+                `).join("") : ""}
+              </div>
+            `).join("") : ""}
+            ${area.devices && area.devices.length > 0 ? area.devices.map(d => `
+              <div style="margin-left:20px;font-size:11px;color:#5B6673;">· ${esc(d.name)}</div>
+            `).join("") : ""}
+          </div>
+        `).join("") : '<div style="margin-left:20px;color:#5B6673;font-size:12px;">No areas defined</div>'}
+        ${site.devices && site.devices.length > 0 ? site.devices.map(d => `
+          <div style="margin-left:20px;font-size:11px;color:#5B6673;">· ${esc(d.name)}</div>
+        `).join("") : ""}
+      </div>
+    `).join("")
+    : '<div class="form-card"><div style="color:#5B6673;">No hierarchy defined. Create a Site to get started.</div></div>';
+
+  return `
+    <div class="top-bar">
+      <div>
+        <h2>Asset Hierarchy</h2>
+        <div class="subtitle">Sites → Areas → Lines → Stations → Devices</div>
+      </div>
+      <div class="top-bar-actions">
+        <button class="btn btn-primary" onclick="showCreateSite()">+ New Site</button>
+      </div>
+    </div>
+    ${tree}
+  `;
+}
+
+async function showCreateSite() {
+  const name = prompt("Site name:");
+  if (!name) return;
+  await fetch(`${API}/api/sites`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  await loadHierarchy();
+  render();
+}
+
+async function editSite(id) {
+  const site = hierarchyData.find(s => s.id === id);
+  if (!site) return;
+  const name = prompt("Site name:", site.name);
+  if (!name) return;
+  await fetch(`${API}/api/sites/${id}`, { method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  await loadHierarchy();
+  render();
+}
+
+async function deleteSite(id) {
+  if (!confirm("Delete this site and all its areas/lines/stations?")) return;
+  await fetch(`${API}/api/sites/${id}`, { method: "DELETE", headers: authHeaders() });
+  await loadHierarchy();
+  render();
+}
+
+async function editArea(id) {
+  const area = hierarchyData.flatMap(s => s.areas || []).find(a => a.id === id);
+  if (!area) return;
+  const name = prompt("Area name:", area.name);
+  if (!name) return;
+  await fetch(`${API}/api/areas/${id}`, { method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  await loadHierarchy();
+  render();
+}
+
+async function deleteArea(id) {
+  if (!confirm("Delete this area and all its lines/stations?")) return;
+  await fetch(`${API}/api/areas/${id}`, { method: "DELETE", headers: authHeaders() });
+  await loadHierarchy();
+  render();
+}
+
+async function editLine(id) {
+  const line = hierarchyData.flatMap(s => (s.areas || []).flatMap(a => a.lines || [])).find(l => l.id === id);
+  if (!line) return;
+  const name = prompt("Line name:", line.name);
+  if (!name) return;
+  await fetch(`${API}/api/lines/${id}`, { method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  await loadHierarchy();
+  render();
+}
+
+async function deleteLine(id) {
+  if (!confirm("Delete this line and all its stations?")) return;
+  await fetch(`${API}/api/lines/${id}`, { method: "DELETE", headers: authHeaders() });
+  await loadHierarchy();
+  render();
+}
+
+async function deleteStation(id) {
+  if (!confirm("Delete this station?")) return;
+  await fetch(`${API}/api/stations/${id}`, { method: "DELETE", headers: authHeaders() });
+  await loadHierarchy();
+  render();
+}
+
+// ---------- Asset Types View ----------
+
+let assetTypes = [];
+
+async function loadAssetTypes() {
+  try {
+    const res = await fetch(`${API}/api/asset-types`, { headers: authHeaders() });
+    if (res.ok) assetTypes = await res.json();
+  } catch {}
+}
+
+function viewAssetTypes() {
+  loadAssetTypes();
+  const types = assetTypes.map(t => `
+    <div class="form-card" style="margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="display:inline-flex;width:28px;height:28px;border-radius:6px;background:${t.color || '#6366F1'};color:#fff;align-items:center;justify-content:center;font-size:12px;">${(t.icon || '◆')[0]}</span>
+          <div>
+            <strong style="font-size:13px;">${esc(t.name)}</strong>
+            ${t.code ? `<span class="mono" style="color:#5B6673;margin-left:6px;">${esc(t.code)}</span>` : ""}
+            ${t.isSystem ? '<span style="font-size:10px;color:#5B6673;margin-left:6px;">system</span>' : ""}
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          ${!t.isSystem ? `<button class="btn btn-sm danger" onclick="deleteAssetType('${t.id}')">Delete</button>` : ""}
+        </div>
+      </div>
+      <div style="font-size:12px;color:#8B95A1;margin-bottom:6px;">${esc(t.description || "")}</div>
+      ${t.metrics && t.metrics.length > 0 ? `
+        <div style="display:flex;flex-wrap:wrap;gap:4px;">
+          ${t.metrics.map(m => `
+            <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:#1E2530;color:#8B95A1;">
+              ${esc(m.displayName)} ${m.unit ? `(${esc(m.unit)})` : ""}
+            </span>
+          `).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `).join("");
+
+  return `
+    <div class="top-bar">
+      <div>
+        <h2>Asset Types</h2>
+        <div class="subtitle">Define device types and their metric schemas</div>
+      </div>
+      <div class="top-bar-actions">
+        <button class="btn btn-primary" onclick="showCreateAssetType()">+ New Asset Type</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;">
+      ${types || '<div class="form-card"><div style="color:#5B6673;">No asset types defined.</div></div>'}
+    </div>
+  `;
+}
+
+async function showCreateAssetType() {
+  const name = prompt("Asset type name:");
+  if (!name) return;
+  await fetch(`${API}/api/asset-types`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  await loadAssetTypes();
+  render();
+}
+
+async function deleteAssetType(id) {
+  if (!confirm("Delete this asset type?")) return;
+  await fetch(`${API}/api/asset-types/${id}`, { method: "DELETE", headers: authHeaders() });
+  await loadAssetTypes();
+  render();
+}
+
+// ---------- Sensors View ----------
+
+let sensors = [];
+
+async function loadSensors() {
+  try {
+    const res = await fetch(`${API}/api/sensors`, { headers: authHeaders() });
+    if (res.ok) sensors = await res.json();
+  } catch {}
+}
+
+function viewSensors() {
+  loadSensors();
+  const rows = sensors.map(s => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #1E2530;">
+      <div>
+        <div style="font-size:13px;">${esc(s.name)}</div>
+        <div style="font-size:11px;color:#5B6673;">${esc(s.type)} · ${esc(s.unit || "N/A")} · Device: ${esc(s.deviceId)}</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <span style="font-size:11px;padding:2px 6px;border-radius:4px;background:${s.enabled ? '#4FD1B520' : '#E5484D20'};color:${s.enabled ? '#4FD1B5' : '#E5484D'};">${s.enabled ? 'enabled' : 'disabled'}</span>
+        <button class="btn btn-sm danger" onclick="deleteSensor('${s.id}')">×</button>
+      </div>
+    </div>
+  `).join("");
+
+  return `
+    <div class="top-bar">
+      <div>
+        <h2>Sensors</h2>
+        <div class="subtitle">Individual measurement points on devices</div>
+      </div>
+    </div>
+    <div class="form-card">
+      ${rows || '<div style="color:#5B6673;padding:16px;">No sensors configured.</div>'}
+    </div>
+  `;
+}
+
+async function deleteSensor(id) {
+  if (!confirm("Delete this sensor?")) return;
+  await fetch(`${API}/api/sensors/${id}`, { method: "DELETE", headers: authHeaders() });
+  await loadSensors();
+  render();
+}
+
+// ---------- Alert Rules View ----------
+
+function viewAlertRules() {
+  const rows = alertRules.map(r => {
+    const device = devices.find(d => d.id === r.deviceId);
+    const statusColor = r.enabled ? "#4FD1B5" : "#5B6673";
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid #1E2530;">
+        <div style="flex:1;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:8px;height:8px;border-radius:50%;background:${statusColor};"></div>
+            <strong style="font-size:13px;">${esc(r.name)}</strong>
+            <span style="font-size:11px;padding:2px 6px;border-radius:4px;background:#1E2530;color:#8B95A1;">${esc(r.severity)}</span>
+          </div>
+          <div style="font-size:11px;color:#5B6673;margin-top:4px;">
+            ${esc(r.metric)} ${esc(r.operator)} ${r.threshold}
+            ${device ? ` · ${esc(device.name)}` : " · All devices"}
+            ${r.cooldownSeconds ? ` · cooldown ${r.cooldownSeconds}s` : ""}
+            ${r.consecutiveCount > 1 ? ` · ${r.consecutiveCount} consecutive` : ""}
+          </div>
+          ${r.messageTemplate ? `<div style="font-size:11px;color:#5B6673;margin-top:2px;font-style:italic;">"${esc(r.messageTemplate)}"</div>` : ""}
+          ${r.lastTriggeredAt ? `<div style="font-size:10px;color:#5B6673;margin-top:2px;">Last triggered: ${new Date(r.lastTriggeredAt).toLocaleString()}</div>` : ""}
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-sm" onclick="testAlertRule('${r.id}')">Test</button>
+          <button class="btn btn-sm danger" onclick="deleteAlertRule('${r.id}')">×</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="top-bar">
+      <div>
+        <h2>Alert Rules</h2>
+        <div class="subtitle">Define threshold rules for any metric</div>
+      </div>
+      <div class="top-bar-actions">
+        <button class="btn btn-primary" onclick="showCreateAlertRule()">+ New Rule</button>
+      </div>
+    </div>
+    <div class="form-card">
+      ${rows || '<div style="color:#5B6673;padding:16px;">No alert rules defined. Create a rule to trigger alerts based on metric thresholds.</div>'}
+    </div>
+  `;
+}
+
+async function showCreateAlertRule() {
+  const name = prompt("Rule name:");
+  if (!name) return;
+  const metric = prompt("Metric name (e.g. weight, temperature, vibration):");
+  if (!metric) return;
+  const operator = prompt("Operator (>, >=, <, <=, ==, !=):", ">");
+  const threshold = prompt("Threshold value:");
+  if (threshold === null) return;
+  const severity = prompt("Severity (info, warning, critical):", "warning");
+  await fetch(`${API}/api/alert-rules`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ name, metric, operator: operator || ">", threshold: Number(threshold), severity: severity || "warning" })
+  });
+  await loadInitial();
+  render();
+}
+
+async function testAlertRule(id) {
+  const deviceId = prompt("Device ID to test against (leave empty for first device):") || devices[0]?.id;
+  if (!deviceId) return;
+  const res = await fetch(`${API}/api/alert-rules/${id}/test`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceId })
+  });
+  const result = await res.json();
+  alert(result.triggered ? `Rule triggered! ${JSON.stringify(result.triggeredRules)}` : "Rule not triggered with current value");
+}
+
+async function deleteAlertRule(id) {
+  if (!confirm("Delete this alert rule?")) return;
+  await fetch(`${API}/api/alert-rules/${id}`, { method: "DELETE", headers: authHeaders() });
+  alertRules = alertRules.filter(r => r.id !== id);
+  render();
+}
+
 // ---------- Boot ----------
 
 async function boot() {
+  // Register service worker for PWA
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
+
   try { const bRes = await fetch(`${API}/api/branding`); branding = await bRes.json(); applyBranding(); } catch {}
   if (!getToken()) { renderLogin(); return; }
   try { await loadInitial(); connectWs(); } catch {}

@@ -35,6 +35,23 @@ async function postReading(payload) {
   lastBackendReachableAt = Date.now();
 }
 
+async function postTelemetry(deviceId, reading) {
+  const metrics = {};
+  if (reading.weight !== undefined) metrics.weight = reading.weight;
+  if (reading.phase !== undefined) metrics.phase = reading.phase;
+  if (reading.bagCount !== undefined) metrics.bag_count = reading.bagCount;
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/telemetry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({ deviceId, metrics, connected: reading.connected !== false }),
+    });
+    if (!res.ok) console.warn(`[gateway] telemetry POST returned ${res.status}`);
+  } catch (err) {
+    // telemetry is best-effort — don't block on failure
+  }
+}
+
 // Retries anything that failed to send earlier (network blip, backend restart, etc).
 // Stops at the first failure so order is preserved and nothing is skipped.
 async function flushQueue() {
@@ -120,6 +137,9 @@ async function pollAll() {
       queue.enqueue(payload);
       console.warn(`[gateway] backend unreachable, buffered reading for ${deviceId} (queue size ${queue.size()})`);
     }
+
+    // Also send to generic telemetry endpoint (best-effort)
+    postTelemetry(deviceId, reading);
   }
 }
 

@@ -1,12 +1,14 @@
 {
-  "name": "Scale Ops - IoT Dashboard",
-  "short_name": "Scale Ops",
-  "description": "Industrial bag-filling scale monitoring platform",
+  "name": "Scale IoT - Industrial Operations Platform",
+  "short_name": "Scale IoT",
+  "description": "Industrial Operations Intelligence Platform for IIoT devices, predictive maintenance, and manufacturing analytics",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#14181D",
   "theme_color": "#F2B705",
   "orientation": "any",
+  "scope": "/",
+  "categories": ["business", "utilities", "industrial"],
   "icons": [
     {
       "src": "/icon-192.png",
