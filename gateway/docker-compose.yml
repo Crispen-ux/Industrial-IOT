@@ -1,0 +1,35 @@
+# One-command edge deployment: `docker compose up -d`
+#
+# The persistent volume matters — the gateway's local reading buffer
+# (pending-readings.jsonl) needs to survive a container restart/update, or a
+# site power blip during a backend outage could still lose buffered data.
+services:
+  gateway:
+    build: .
+    image: scale-ops-gateway:latest
+    container_name: scale-ops-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - gateway-buffer:/app/data
+    environment:
+      # queue.js writes pending-readings.jsonl relative to the gateway dir —
+      # this keeps it inside the mounted volume instead of the container's
+      # ephemeral filesystem. Requires QUEUE_DIR support (see queue.js note
+      # in the deployment guide if you're on an older gateway version).
+      - QUEUE_DIR=/app/data
+    ports:
+      # Bind to the host's loopback/LAN interface only — never expose this
+      # to the internet. It's diagnostic-only, not meant to be reachable
+      # outside the site network. Change 9090:9090 to 127.0.0.1:9090:9090
+      # if you want it unreachable from the rest of the LAN too.
+      - "9090:9090"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gateway-buffer:

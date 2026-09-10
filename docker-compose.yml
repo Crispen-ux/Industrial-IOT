@@ -1,0 +1,50 @@
+# Full stack: `docker compose up -d`
+#
+# Runs both the backend (API + WebSocket + dashboard) and the gateway
+# (polls scales, feeds readings to the backend). Each service has its own
+# .env file — copy .env.example to .env in each directory and fill in the
+# values before starting.
+#
+# The gateway's persistent volume preserves its reading buffer across
+# restarts. The backend depends on Postgres — set DATABASE_URL in
+# backend/.env to point at your Neon or local Postgres instance.
+services:
+  backend:
+    build: backend
+    image: scale-ops-backend:latest
+    container_name: scale-ops-backend
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    ports:
+      - "4000:4000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gateway:
+    build: gateway
+    image: scale-ops-gateway:latest
+    container_name: scale-ops-gateway
+    restart: unless-stopped
+    env_file:
+      - gateway/.env
+    depends_on:
+      - backend
+    volumes:
+      - gateway-buffer:/app/data
+    environment:
+      - QUEUE_DIR=/app/data
+      - BACKEND_URL=http://backend:4000
+    ports:
+      - "127.0.0.1:9090:9090"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gateway-buffer:
