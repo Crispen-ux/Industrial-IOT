@@ -1063,3 +1063,73 @@ CREATE TABLE IF NOT EXISTS data_import_jobs (
 CREATE INDEX IF NOT EXISTS idx_import_jobs_user ON data_import_jobs(user_id);
 CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON data_import_jobs(status);
 
+-- ============================================================
+-- Phase 9: Consolidated Dashboard System
+-- Replaces flat `widgets` table with enhanced dashboard_views/dashboard_widgets
+-- ============================================================
+
+-- Add user_id to dashboard_views (null = shared/default view)
+DO $$ BEGIN
+  ALTER TABLE dashboard_views ADD COLUMN user_id TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Enhance dashboard_widgets with position, scope, and config
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN x INTEGER DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN y INTEGER DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN w INTEGER DEFAULT 4;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN h INTEGER DEFAULT 3;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN scope_type TEXT DEFAULT 'device';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN scope_id TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE dashboard_widgets ADD COLUMN config JSONB DEFAULT '{}';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Migrate existing flat widgets into dashboard_widgets under a "Default" view
+-- (only if dashboard_widgets is empty and widgets has data)
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM dashboard_widgets) = 0 AND (SELECT count(*) FROM widgets) > 0 THEN
+    -- Create a default view if none exists
+    IF (SELECT count(*) FROM dashboard_views) = 0 THEN
+      INSERT INTO dashboard_views (id, name, is_default, created_at)
+      VALUES ('dv_default', 'Default', true, now());
+    END IF;
+    -- Copy each flat widget into dashboard_widgets with grid position
+    INSERT INTO dashboard_widgets (id, view_id, device_id, metric, sort_order, x, y, w, h, scope_type, config, created_at)
+    SELECT
+      'dw_' || id,
+      (SELECT id FROM dashboard_views WHERE is_default = true LIMIT 1),
+      device_id,
+      metric,
+      ROW_NUMBER() OVER (ORDER BY id) - 1,
+      ((ROW_NUMBER() OVER (ORDER BY id) - 1) % 4) * 3,
+      ((ROW_NUMBER() OVER (ORDER BY id) - 1) / 4) * 3,
+      3,
+      3,
+      'device',
+      '{}',
+      now()
+    FROM widgets;
+  END IF;
+END $$;
+

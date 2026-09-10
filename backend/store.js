@@ -517,35 +517,72 @@ const store = {
   },
 
   // --- dashboard views ---
-  async listDashboardViews() {
-    const { rows } = await db.query("SELECT * FROM dashboard_views ORDER BY is_default DESC, name");
-    return rows.map(r => ({ id: r.id, name: r.name, isDefault: r.is_default, createdBy: r.created_by, createdAt: r.created_at }));
+  async listDashboardViews(userId) {
+    // Return shared views (user_id IS NULL) and the user's personal views
+    const { rows } = await db.query(
+      "SELECT * FROM dashboard_views WHERE user_id IS NULL OR user_id = $1 ORDER BY is_default DESC, name",
+      [userId]
+    );
+    return rows.map(r => ({ id: r.id, name: r.name, isDefault: r.is_default, createdBy: r.created_by, userId: r.user_id, createdAt: r.created_at }));
   },
-  async addDashboardView(name, createdBy) {
+  async addDashboardView(name, createdBy, userId) {
     const id = `dv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const existing = await db.query("SELECT count(*) FROM dashboard_views");
     const isDefault = Number(existing.rows[0].count) === 0;
     await db.query(
-      "INSERT INTO dashboard_views (id, name, is_default, created_by, created_at) VALUES ($1,$2,$3,$4,now())",
-      [id, name, isDefault, createdBy]
+      "INSERT INTO dashboard_views (id, name, is_default, user_id, created_by, created_at) VALUES ($1,$2,$3,$4,$5,now())",
+      [id, name, isDefault, userId || null, createdBy]
     );
-    return { id, name, isDefault, createdBy };
+    return { id, name, isDefault, userId: userId || null, createdBy };
   },
   async removeDashboardView(id) {
     await db.query("DELETE FROM dashboard_views WHERE id = $1 AND is_default = false", [id]);
   },
-  async getDashboardWidgets(viewId) {
-    const { rows } = await db.query("SELECT * FROM dashboard_widgets WHERE view_id = $1 ORDER BY sort_order", [viewId]);
-    return rows.map(r => ({ id: r.id, deviceId: r.device_id, metric: r.metric, sortOrder: r.sort_order }));
+  async duplicateDashboardView(sourceId, newName, userId) {
+    const source = await db.query("SELECT * FROM dashboard_views WHERE id = $1", [sourceId]);
+    if (!source.rows[0]) throw new Error("view not found");
+    const newView = await this.addDashboardView(newName, userId, userId);
+    // Copy all widgets from source view
+    const widgets = await db.query("SELECT * FROM dashboard_widgets WHERE view_id = $1", [sourceId]);
+    for (const w of widgets.rows) {
+      await db.query(
+        "INSERT INTO dashboard_widgets (id, view_id, device_id, metric, sort_order, x, y, w, h, scope_type, scope_id, config, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())",
+        [`dw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, newView.id, w.device_id, w.metric, w.sort_order, w.x, w.y, w.w, w.h, w.scope_type, w.scope_id, w.config]
+      );
+    }
+    return newView;
   },
-  async addDashboardWidget(viewId, deviceId, metric) {
+  async getDashboardWidgets(viewId) {
+    const { rows } = await db.query("SELECT * FROM dashboard_widgets WHERE view_id = $1 ORDER BY y, x", [viewId]);
+    return rows.map(r => ({
+      id: r.id, deviceId: r.device_id, metric: r.metric, sortOrder: r.sort_order,
+      x: r.x, y: r.y, w: r.w, h: r.h,
+      scopeType: r.scope_type, scopeId: r.scope_id, config: r.config || {},
+    }));
+  },
+  async addDashboardWidget(viewId, { deviceId, metric, x, y, w, h, scopeType, scopeId, config }) {
     const id = `dw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const maxOrder = await db.query("SELECT COALESCE(MAX(sort_order),0)+1 as next FROM dashboard_widgets WHERE view_id=$1", [viewId]);
     await db.query(
-      "INSERT INTO dashboard_widgets (id, view_id, device_id, metric, sort_order, created_at) VALUES ($1,$2,$3,$4,$5,now())",
-      [id, viewId, deviceId, metric, maxOrder.rows[0].next]
+      "INSERT INTO dashboard_widgets (id, view_id, device_id, metric, sort_order, x, y, w, h, scope_type, scope_id, config, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())",
+      [id, viewId, deviceId, metric, maxOrder.rows[0].next, x || 0, y || 0, w || 4, h || 3, scopeType || "device", scopeId || null, JSON.stringify(config || {})]
     );
-    return { id, viewId, deviceId, metric, sortOrder: maxOrder.rows[0].next };
+    return { id, viewId, deviceId, metric, x: x || 0, y: y || 0, w: w || 4, h: h || 3, scopeType: scopeType || "device", scopeId: scopeId || null, config: config || {} };
+  },
+  async updateDashboardWidget(id, updates) {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+    for (const [key, val] of Object.entries(updates)) {
+      const col = { x: "x", y: "y", w: "w", h: "h", config: "config", deviceId: "device_id", metric: "metric", scopeType: "scope_type", scopeId: "scope_id" }[key];
+      if (!col) continue;
+      fields.push(`${col} = $${idx}`);
+      values.push(key === "config" ? JSON.stringify(val) : val);
+      idx++;
+    }
+    if (fields.length === 0) return;
+    values.push(id);
+    await db.query(`UPDATE dashboard_widgets SET ${fields.join(", ")} WHERE id = $${idx}`, values);
   },
   async removeDashboardWidget(id) {
     await db.query("DELETE FROM dashboard_widgets WHERE id = $1", [id]);

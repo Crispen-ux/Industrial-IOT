@@ -27,6 +27,8 @@ class ModbusDriver extends BaseDriver {
     super(device);
     this.client = null;
     this.regConfig = this._parseRegConfig(device);
+    this._reconnecting = false;
+    this._lastConnectFailed = false;
   }
 
   _parseRegConfig(device) {
@@ -76,16 +78,30 @@ class ModbusDriver extends BaseDriver {
       this.client.setID(this.regConfig.unitId);
       this.client.setTimeout(3000);
       this.connected = true;
+      this._lastConnectFailed = false;
       console.log(`[modbus] connected to ${this.device.ip || this.device.serialPort}`);
     } catch (e) {
-      console.error(`[modbus] connect failed: ${e.message}`);
+      console.error(`[modbus] connect failed for ${this.device.ip || this.device.serialPort}: ${e.message}`);
       this.connected = false;
+      this._lastConnectFailed = true;
+      this.client = null;
     }
   }
 
   async read() {
     if (!this.client || !this.connected) {
-      return { weight: 0, phase: "offline", bagCount: 0, connected: false };
+      // Attempt reconnection if we haven't already tried recently
+      if (!this._reconnecting && !this._lastConnectFailed) {
+        this._reconnecting = true;
+        try {
+          await this.connect();
+        } finally {
+          this._reconnecting = false;
+        }
+      }
+      if (!this.connected) {
+        return { weight: 0, phase: "offline", bagCount: 0, connected: false };
+      }
     }
     try {
       const res = await this.client.readHoldingRegisters(
@@ -97,6 +113,11 @@ class ModbusDriver extends BaseDriver {
         raw = this._combineRegisters(res.data[0], res.data[1]);
       }
       const weight = this._decodeWeight(raw) * this.regConfig.scaleFactor;
+
+      // Reject garbage values (NaN, Infinity, negative when not expected)
+      if (!isFinite(weight) || isNaN(weight)) {
+        return { weight: 0, phase: "error", bagCount: 0, connected: true };
+      }
 
       // Read status register
       let phase = "idle";
@@ -118,8 +139,15 @@ class ModbusDriver extends BaseDriver {
         bagCount = bagRes.data[0];
       } catch (e) {}
 
+      this._lastConnectFailed = false;
       return { weight, phase, bagCount, connected: true };
     } catch (e) {
+      // Mark connection as lost — next read() attempt will try to reconnect
+      this.connected = false;
+      this._lastConnectFailed = false; // allow reconnect on next read
+      try { await this.client.close(); } catch {}
+      this.client = null;
+      console.warn(`[modbus] read failed for ${this.device.ip}: ${e.message} — will reconnect on next read`);
       return { weight: 0, phase: "error", bagCount: 0, connected: false };
     }
   }

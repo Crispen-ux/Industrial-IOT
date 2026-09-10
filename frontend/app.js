@@ -15,7 +15,7 @@ const ROLES = ["operator", "manager", "admin"];
 const ROLE_RANK = { operator: 0, manager: 1, admin: 2 };
 
 let devices = [];
-let widgets = [];
+let currentWidgets = [];
 let branding = { companyName: "Scale Ops", tagline: "Fill Line Monitoring", logoUrl: "", accentColor: "#F2B705" };
 let gatewayKeys = [];
 let newlyCreatedKey = null;
@@ -145,7 +145,7 @@ async function login(username, password, twoFactorCode) {
 function logout() {
   setToken(null);
   if (ws) ws.close();
-  devices = []; widgets = []; currentUser = null;
+  devices = []; currentWidgets = []; currentUser = null;
   // Clear the cached layout so the next login does a full render
   const main = document.getElementById("main-content");
   if (main) main.removeAttribute("id");
@@ -161,7 +161,6 @@ async function loadInitial() {
 
   const calls = [
     authFetch(`${API}/api/devices`),
-    authFetch(`${API}/api/widgets`),
     authFetch(`${API}/api/alerts`),
     authFetch(`${API}/api/alert-config`),
     authFetch(`${API}/api/products`),
@@ -171,6 +170,7 @@ async function loadInitial() {
     authFetch(`${API}/api/maintenance-failures`),
     authFetch(`${API}/api/calibrations`),
     authFetch(`${API}/api/device-health`),
+    authFetch(`${API}/api/dashboard-views`),
     brandingPromise,
   ];
   if (hasRole("manager")) {
@@ -206,7 +206,6 @@ async function loadInitial() {
   const results = await Promise.all(calls);
   let i = 0;
   devices = await results[i++].json();
-  widgets = await results[i++].json();
   const alertData = await results[i++].json();
   activeAlerts = alertData.active;
   alertHistory = alertData.history;
@@ -218,7 +217,19 @@ async function loadInitial() {
   maintenanceFailures = await results[i++].json();
   calibrationRecords = await results[i++].json();
   deviceHealthScores = await results[i++].json();
+  dashboardViews = await results[i++].json();
   branding = await results[i++].json();
+  if (dashboardViews.length && !currentDashboardViewId) {
+    const def = dashboardViews.find(v => v.isDefault) || dashboardViews[0];
+    currentDashboardViewId = def.id;
+  }
+  // Load widgets for current view
+  if (currentDashboardViewId) {
+    try {
+      const wRes = await authFetch(`${API}/api/dashboard-views/${currentDashboardViewId}/widgets`);
+      currentWidgets = await wRes.json();
+    } catch { currentWidgets = []; }
+  }
   if (hasRole("manager")) {
     gatewayKeys = await results[i++].json();
     auditLog = await results[i++].json();
@@ -226,11 +237,6 @@ async function loadInitial() {
     downtimeLogs = await results[i++].json();
     downtimeStats = await results[i++].json();
     scheduledReports = await results[i++].json();
-    dashboardViews = await results[i++].json();
-    if (dashboardViews.length && !currentDashboardViewId) {
-      const def = dashboardViews.find(v => v.isDefault) || dashboardViews[0];
-      currentDashboardViewId = def.id;
-    }
     deviceGroups = await results[i++].json();
     batches = await results[i++].json();
     aiInsights = await results[i++].json();
@@ -299,7 +305,7 @@ function connectWs() {
 function liveRender() {
   if (LIVE_VIEWS.has(currentView)) {
     render();
-    if (currentView === "dashboard") setTimeout(initDragDrop, 50);
+    if (currentView === "dashboard") setTimeout(initGridStack, 50);
   }
 }
 
@@ -379,28 +385,7 @@ async function resetDeviceStats(id) {
   } catch (e) { toast("Failed: " + e.message, "error"); }
 }
 
-async function addWidget(payload) {
-  try {
-    const res = await authFetch(`${API}/api/widgets`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      toast(body.error || "Failed to add widget", "error");
-      return;
-    }
-    await loadInitial();
-    toast("Widget added", "success");
-  } catch (e) {
-    toast("Failed to add widget: " + e.message, "error");
-  }
-}
-
-async function removeWidget(id) {
-  try {
-    await authFetch(`${API}/api/widgets/${id}`, { method: "DELETE" });
-    await loadInitial();
-    toast("Widget removed", "success");
-  } catch (e) { toast("Failed: " + e.message, "error"); }
-}
+// Old addWidget/removeWidget replaced by dashboard_views system — see addWidgetDialog/removeWidget below
 
 async function createGatewayKey() {
   const label = prompt("Label for this gateway key:", "gateway");
@@ -710,7 +695,7 @@ async function wizardTestConnection() {
 async function wizardTestDatapoint() {
   wizardCaptureRegisterMap();
   wizardData.dpResult = { loading: true }; render();
-  const res = await authFetch(`${API}/api/engineering/test-datapoint`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ registerMap: wizardData.registerMap, unit: wizardData.unit }) });
+  const res = await authFetch(`${API}/api/engineering/test-datapoint`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ registerMap: wizardData.registerMap, unit: wizardData.unit, ip: wizardData.ip, protocol: wizardData.protocol, port: wizardData.port }) });
   wizardData.dpResult = await res.json(); render();
 }
 
@@ -814,7 +799,7 @@ function navigate(view) {
   if (view === "sync") loadSyncPanel();
   else if (view === "spc") { loadSPCData(); }
   else if (view === "oee") { loadOEE(); }
-  else if (view === "dashboard") { render(); setTimeout(initDragDrop, 50); }
+  else if (view === "dashboard") { render(); setTimeout(initGridStack, 50); }
   else render();
 }
 
@@ -1176,6 +1161,8 @@ function renderView() {
 
 function viewDashboard() {
   const currentViewData = dashboardViews.find(v => v.id === currentDashboardViewId);
+  const isPersonal = currentViewData?.userId === currentUser?.id;
+  const canEdit = isPersonal || hasRole("manager");
   return `
     <div class="top-bar">
       <div>
@@ -1183,8 +1170,7 @@ function viewDashboard() {
         <div class="subtitle">${devices.length} device${devices.length !== 1 ? "s" : ""} connected</div>
       </div>
       <div class="top-bar-actions">
-        ${hasRole("manager") ? `<button class="btn" onclick="openWizard()">+ Add device</button>` : ""}
-        ${hasRole("manager") ? `<button class="btn btn-primary" onclick="currentView='devices';render()">+ Add widget</button>` : ""}
+        ${canEdit ? `<button class="btn btn-primary" onclick="addWidgetDialog()">+ Add widget</button>` : ""}
         <button class="btn" onclick="showPasswordChange=true;render()">Change password</button>
       </div>
     </div>
@@ -1192,41 +1178,109 @@ function viewDashboard() {
     <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center;flex-wrap:wrap;">
       ${dashboardViews.map(v => `
         <button class="btn ${v.id === currentDashboardViewId ? 'btn-primary' : ''}" onclick="switchDashboardView('${v.id}')" style="font-size:13px;">
-          ${esc(v.name)}${v.isDefault ? ' (default)' : ''}
+          ${esc(v.name)}${v.isDefault ? ' (default)' : ''}${v.userId ? ' (you)' : ''}
         </button>`).join("")}
-      ${hasRole("manager") ? `
-        <button class="btn btn-sm" onclick="createDashboardView()">+ New view</button>
-        ${currentViewData && !currentViewData.isDefault ? `<button class="btn btn-sm btn-danger" onclick="deleteDashboardView('${currentDashboardViewId}')">Delete view</button>` : ""}
+      <button class="btn btn-sm" onclick="createDashboardView(false)">+ Personal view</button>
+      ${hasRole("manager") ? `<button class="btn btn-sm" onclick="createDashboardView(true)">+ Shared view</button>` : ""}
+      ${currentViewData && !currentViewData.isDefault ? `
+        <button class="btn btn-sm" onclick="duplicateDashboardView('${currentDashboardViewId}')">Duplicate</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteDashboardView('${currentDashboardViewId}')">Delete</button>
       ` : ""}
     </div>` : ""}
     <div class="section-label mono">Widgets</div>
-    <div class="widget-grid" id="widget-grid">
-      ${widgets.map(w => renderWidget(w)).join("") || `<div class="empty" style="grid-column:1/-1;">No widgets yet. Go to Devices to add one.</div>`}
-    </div>`;
+    <div class="grid-stack" id="widget-grid"></div>`;
+}
+
+function initGridStack() {
+  const gridEl = document.getElementById("widget-grid");
+  if (!gridEl || !window.GridStack) return;
+  // Destroy existing instance
+  if (gridEl._gridstack) { gridEl._gridstack.destroy(false); gridEl.innerHTML = ""; }
+
+  const grid = GridStack.init({
+    cellHeight: 80,
+    margin: 8,
+    column: 12,
+    animate: true,
+    disableOneColumnMode: false,
+    float: true,
+  }, gridEl);
+  gridEl._gridstack = grid;
+
+  // Render existing widgets
+  grid.removeAll();
+  for (const w of currentWidgets) {
+    const device = devices.find(d => d.id === w.deviceId);
+    if (!device) continue;
+    const node = { id: w.id, x: w.x || 0, y: w.y || 0, w: w.w || 4, h: w.h || 3 };
+    grid.addWidget(node);
+  }
+
+  // Render widget content after layout
+  renderGridWidgets(grid);
+
+  // Save on change
+  grid.on("change", (event, items) => {
+    if (!items || !items.length) return;
+    const updates = items.map(item => ({
+      id: item.id,
+      x: item.x,
+      y: item.y,
+      w: item.w,
+      h: item.h,
+    }));
+    authFetch(`${API}/api/dashboard-widgets/${currentDashboardViewId}/batch`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ widgets: updates }),
+    }).catch(() => {});
+  });
+}
+
+function renderGridWidgets(grid) {
+  for (const w of currentWidgets) {
+    const el = grid.el.querySelector(`[gs-id="${w.id}"]`);
+    if (!el) continue;
+    el.innerHTML = renderWidgetContent(w);
+    el.classList.add("widget");
+  }
 }
 
 async function switchDashboardView(viewId) {
   currentDashboardViewId = viewId;
-  // Load widgets for this view
   try {
     const res = await authFetch(`${API}/api/dashboard-views/${viewId}/widgets`);
-    widgets = await res.json();
+    currentWidgets = await res.json();
     render();
   } catch (e) { console.error("Failed to load dashboard view:", e); }
 }
 
-async function createDashboardView() {
-  const name = prompt("Dashboard view name:");
+async function createDashboardView(shared) {
+  const name = prompt(shared ? "Shared view name:" : "Personal view name:");
   if (!name) return;
   try {
-    const res = await authFetch(`${API}/api/dashboard-views`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    const res = await authFetch(`${API}/api/dashboard-views`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, shared }) });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
     const view = await res.json();
     dashboardViews.push(view);
     currentDashboardViewId = view.id;
-    widgets = [];
+    currentWidgets = [];
     toast("View created", "success");
     render();
+  } catch (e) { toast("Failed: " + e.message, "error"); }
+}
+
+async function duplicateDashboardView(viewId) {
+  const name = prompt("Name for duplicated view:");
+  if (!name) return;
+  try {
+    const res = await authFetch(`${API}/api/dashboard-views/${viewId}/duplicate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
+    const view = await res.json();
+    dashboardViews.push(view);
+    currentDashboardViewId = view.id;
+    await switchDashboardView(view.id);
+    toast("View duplicated", "success");
   } catch (e) { toast("Failed: " + e.message, "error"); }
 }
 
@@ -1235,47 +1289,23 @@ async function deleteDashboardView(viewId) {
   try {
     await authFetch(`${API}/api/dashboard-views/${viewId}`, { method: "DELETE" });
     dashboardViews = dashboardViews.filter(v => v.id !== viewId);
-    if (currentDashboardViewId === viewId) {
-      const def = dashboardViews.find(v => v.isDefault) || dashboardViews[0];
-      currentDashboardViewId = def?.id || "";
-      if (currentDashboardViewId) await switchDashboardView(currentDashboardViewId);
-      else { widgets = []; render(); }
-    }
+    const def = dashboardViews.find(v => v.isDefault) || dashboardViews[0];
+    currentDashboardViewId = def?.id || "";
+    if (currentDashboardViewId) await switchDashboardView(currentDashboardViewId);
+    else { currentWidgets = []; render(); }
     toast("View deleted", "success");
   } catch (e) { toast("Failed: " + e.message, "error"); }
 }
 
-function initDragDrop() {
-  const grid = document.getElementById("widget-grid");
-  if (!grid) return;
-  let draggedEl = null;
-  grid.querySelectorAll(".widget").forEach(w => {
-    w.draggable = true;
-    w.addEventListener("dragstart", (e) => { draggedEl = w; w.style.opacity = "0.4"; e.dataTransfer.effectAllowed = "move"; });
-    w.addEventListener("dragend", () => { if (draggedEl) draggedEl.style.opacity = "1"; draggedEl = null; });
-    w.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
-    w.addEventListener("drop", (e) => {
-      e.preventDefault();
-      if (!draggedEl || draggedEl === w) return;
-      const parent = w.parentNode;
-      const children = [...parent.children];
-      const fromIdx = children.indexOf(draggedEl);
-      const toIdx = children.indexOf(w);
-      if (fromIdx < toIdx) parent.insertBefore(draggedEl, w.nextSibling);
-      else parent.insertBefore(draggedEl, w);
-      // Save new order
-      const newOrder = [...parent.children].map(el => el.dataset.widgetId).filter(Boolean);
-      if (newOrder.length) authFetch(`${API}/api/dashboard-views/${currentDashboardViewId}/reorder`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ widgetIds: newOrder }) });
-    });
-  });
-}
+// initDragDrop replaced by GridStack — see initGridStack()
 
-function renderWidget(widget) {
+function renderWidgetContent(widget) {
   const device = devices.find(d => d.id === widget.deviceId);
-  if (!device) return "";
+  if (!device) return `<div class="widget-metric">Unknown device</div>`;
   const reading = latestByDevice.get(device.id);
   const connected = reading ? reading.connected : false;
   const metric = METRICS.find(m => m.id === widget.metric);
+  const config = widget.config || {};
   let body = "";
 
   if (widget.metric === "live_weight") {
@@ -1348,12 +1378,45 @@ function renderWidget(widget) {
       </div>`;
   }
 
-  return `<div class="widget" data-widget-id="${widget.id}">
-    ${hasRole("manager") ? `<button class="widget-remove" onclick="removeWidget('${widget.id}')">✕</button>` : ""}
-    <div class="widget-metric">${metric.label}</div>
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="widget-metric">${metric?.label || widget.metric}</div>
+      <button class="widget-remove" onclick="removeWidget('${widget.id}')" style="background:none;border:none;color:#5B6673;cursor:pointer;font-size:16px;">✕</button>
+    </div>
     <div class="widget-device">${esc(device.name)}</div>
-    ${body}
-  </div>`;
+    ${body}`;
+}
+
+async function addWidgetDialog() {
+  const deviceId = prompt("Device ID (from Devices page):");
+  if (!deviceId) return;
+  const device = devices.find(d => d.id === deviceId);
+  if (!device) { toast("Device not found", "error"); return; }
+  const metricList = METRICS.map((m, i) => `${i + 1}. ${m.label}`).join("\n");
+  const idx = prompt(`Select metric:\n${metricList}\n\nEnter number (1-${METRICS.length}):`);
+  const metricIdx = parseInt(idx) - 1;
+  if (isNaN(metricIdx) || metricIdx < 0 || metricIdx >= METRICS.length) { toast("Invalid selection", "error"); return; }
+  const metric = METRICS[metricIdx].id;
+
+  try {
+    const res = await authFetch(`${API}/api/dashboard-views/${currentDashboardViewId}/widgets`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceId, metric, x: 0, y: 0, w: 4, h: 3 }),
+    });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
+    const widget = await res.json();
+    currentWidgets.push(widget);
+    toast("Widget added", "success");
+    render();
+  } catch (e) { toast("Failed: " + e.message, "error"); }
+}
+
+async function removeWidget(widgetId) {
+  try {
+    await authFetch(`${API}/api/dashboard-widgets/${widgetId}`, { method: "DELETE" });
+    currentWidgets = currentWidgets.filter(w => w.id !== widgetId);
+    render();
+  } catch (e) { toast("Failed: " + e.message, "error"); }
 }
 
 // ---------- Devices ----------
@@ -1392,22 +1455,10 @@ function viewDevices() {
       }).join("") || `<div class="empty">No devices yet.</div>`}
     </div>
     <div class="section-label mono" style="margin-top:20px;">Add widget for a device</div>
-    ${hasRole("manager") ? `
     <div class="form-card">
-      <div class="form-grid" style="grid-template-columns:1.2fr 1fr auto;">
-        <div><label>Device</label><select id="wf-device">${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></div>
-        <div><label>Analytic</label><select id="wf-metric">${METRICS.map(m => `<option value="${m.id}">${m.label}</option>`).join("")}</select></div>
-        <button class="btn btn-primary" onclick="submitWidgetForm()">Add widget</button>
-      </div>
-    </div>` : `<div class="empty">Manager role required to add widgets.</div>`}
+      <div style="font-size:13px;color:#8B95A1;">Switch to Dashboard and click "+ Add widget" to add widgets for any device.</div>
+    </div>
   `;
-}
-
-function submitWidgetForm() {
-  const deviceId = document.getElementById("wf-device").value;
-  const metric = document.getElementById("wf-metric").value;
-  if (!deviceId) return;
-  addWidget({ deviceId, metric });
 }
 
 // ---------- Products ----------

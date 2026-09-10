@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 const http = require("http");
 const { WebSocketServer } = require("ws");
 const path = require("path");
@@ -10,6 +11,7 @@ const auth = require("./auth");
 const notify = require("./notify");
 const { encrypt, decrypt, isEncrypted } = require("./crypto");
 const db = require("./db");
+const crypto = require("crypto");
 const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
 
@@ -17,8 +19,25 @@ const PORT = process.env.PORT || 4000;
 const ROLES = ["operator", "manager", "admin"];
 const ROLE_RANK = { operator: 0, manager: 1, admin: 2 };
 
+// CORS origin allow-list via env var (comma-separated origins, or * for dev)
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const corsOptions = {
+  origin: ALLOWED_ORIGINS.includes("*")
+    ? true
+    : (origin, cb) => {
+        // Allow requests with no origin (same-origin, curl, server-to-server)
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+        cb(new Error("Not allowed by CORS"));
+      },
+  credentials: true,
+};
+
 const app = express();
-app.use(cors());
+app.use(helmet({ contentSecurityPolicy: false })); // CSP off — frontend uses inline scripts
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "frontend")));
 
@@ -49,7 +68,7 @@ const swaggerSpec = swaggerJsdoc({
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, { customCss: ".swagger-ui .topbar { display: none }", customSiteTitle: "Scale Ops API Docs" }));
 app.get("/api-docs.json", (req, res) => res.json(swaggerSpec));
 
-// Rate limiting middleware
+// Rate limiting middleware — keyed on authenticated user ID
 const rateLimitStore = new Map(); // In-memory, reset on restart
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 200;
@@ -71,6 +90,34 @@ function rateLimitMiddleware(req, res, next) {
   }
   next();
 }
+
+// IP-keyed rate limiting for unauthenticated endpoints (login, 2FA)
+const loginRateLimitStore = new Map();
+const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const LOGIN_RATE_LIMIT_MAX = parseInt(process.env.LOGIN_RATE_LIMIT_MAX) || 10;
+
+function loginRateLimit(req, res, next) {
+  const ip = req.ip || req.connection?.remoteAddress || "unknown";
+  const now = Date.now();
+  let entry = loginRateLimitStore.get(ip);
+  if (!entry || now - entry.start > LOGIN_RATE_LIMIT_WINDOW_MS) {
+    entry = { count: 0, start: now };
+    loginRateLimitStore.set(ip, entry);
+  }
+  entry.count++;
+  if (entry.count > LOGIN_RATE_LIMIT_MAX) {
+    return res.status(429).json({ error: "Too many login attempts. Try again in 15 minutes." });
+  }
+  next();
+}
+
+// Periodic cleanup of stale login rate limit entries (every 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginRateLimitStore) {
+    if (now - entry.start > LOGIN_RATE_LIMIT_WINDOW_MS * 2) loginRateLimitStore.delete(ip);
+  }
+}, 5 * 60 * 1000).unref();
 
 // Usage tracking middleware
 app.use("/api", (req, res, next) => {
@@ -114,6 +161,12 @@ async function decodeUserToken(req) {
   if (!token || !secret) return null;
   const payload = auth.verifyToken(token, secret);
   if (!payload) return null;
+  // Check that a live session row exists for this token — this makes session
+  // revocation actually work: when a session row is deleted, the JWT is
+  // rejected even if it hasn't expired yet.
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const session = await store.findSessionByToken(tokenHash);
+  if (!session) return null;
   // role is looked up live (not trusted from the token) so a role change or
   // account removal takes effect immediately, not after the token expires
   const user = await store.findUserById(payload.uid);
@@ -189,7 +242,7 @@ function audit(req, action, details = {}) {
 
 // ---------- Auth routes ----------
 
-app.post("/api/auth/login", ah(async (req, res) => {
+app.post("/api/auth/login", loginRateLimit, ah(async (req, res) => {
   const { username, password, twoFactorCode } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: "username and password are required" });
@@ -211,9 +264,9 @@ app.post("/api/auth/login", ah(async (req, res) => {
 
   const secret = await store.getJwtSecret();
   const token = auth.signToken({ uid: user.id }, secret);
-  // Track session
+  // Track session — expire at same time as JWT (12h) so they stay in sync
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
   await store.createSession(user.id, tokenHash, req.ip, req.get("User-Agent"), expiresAt);
   store.logAudit({ username: user.username, role: user.role, action: "login", details: {} })
     .catch((err) => console.error("[audit] failed to log:", err.message));
@@ -307,7 +360,6 @@ app.post("/api/auth/change-password", requireUserMw, ah(async (req, res) => {
 // ---------- 2FA (TOTP) ----------
 const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
-const crypto = require("crypto");
 
 app.get("/api/auth/2fa/status", requireUserMw, ah(async (req, res) => {
   const status = await store.get2FASecret(req.user.id);
@@ -322,7 +374,7 @@ app.post("/api/auth/2fa/setup", requireUserMw, ah(async (req, res) => {
   res.json({ secret: secret.base32, qr: qrDataUrl });
 }));
 
-app.post("/api/auth/2fa/verify", requireUserMw, ah(async (req, res) => {
+app.post("/api/auth/2fa/verify", loginRateLimit, requireUserMw, ah(async (req, res) => {
   const { code } = req.body;
   const status = await store.get2FASecret(req.user.id);
   if (!status?.secret) return res.status(400).json({ error: "2FA not set up" });
@@ -679,28 +731,7 @@ app.post("/api/devices/:id/reset-stats", requireRole("manager"), ah(async (req, 
   res.json(stats);
 }));
 
-// ---------- Widgets (view: any role, manage: manager+) ----------
-
-app.get("/api/widgets", requireUserMw, ah(async (req, res) => {
-  res.json(await store.listWidgets());
-}));
-
-app.post("/api/widgets", requireRole("manager"), ah(async (req, res) => {
-  const { deviceId, metric } = req.body;
-  if (!deviceId || !metric) {
-    return res.status(400).json({ error: "deviceId and metric are required" });
-  }
-  const widget = { id: `w_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, deviceId, metric };
-  await store.addWidget(widget);
-  audit(req, "widget_add", { deviceId, metric });
-  res.status(201).json(widget);
-}));
-
-app.delete("/api/widgets/:id", requireRole("manager"), ah(async (req, res) => {
-  await store.removeWidget(req.params.id);
-  audit(req, "widget_remove", { widgetId: req.params.id });
-  res.status(204).end();
-}));
+// ---------- Widgets (legacy — removed, using dashboard_views system) ----------
 
 // ---------- Products (Product Management) ----------
 
@@ -1059,15 +1090,33 @@ app.put("/api/engineering/devices/:id/protocol-config", requireRole("admin"), ah
 // off whatever the wizard has gathered so far instead of a saved device.
 app.post("/api/engineering/test-connection", requireRole("manager"), ah(async (req, res) => {
   const { ip, protocol, port } = req.body;
-  const start = Date.now();
-  await new Promise((r) => setTimeout(r, 150 + Math.random() * 250));
-  const latencyMs = Date.now() - start;
-  const success = !!ip && !!protocol;
-  res.json({ success, latencyMs, protocol, ip, port, message: success ? "Connection established" : "Missing IP or protocol" });
+  if (protocol === "Modbus TCP") {
+    const modbusTest = require("./modbus-test");
+    const result = await modbusTest.testConnection({ ip, port: port || 502 });
+    return res.json({ ...result, protocol, ip, port: port || 502 });
+  }
+  // Other protocols — not yet implemented for real testing
+  res.json({ success: false, latencyMs: 0, protocol, ip, port, message: `Real ${protocol} testing not yet implemented. The device will be tested when the gateway connects.` });
 }));
 
 app.post("/api/engineering/test-datapoint", requireRole("manager"), ah(async (req, res) => {
-  const { registerMap, unit } = req.body;
+  const { registerMap, unit, ip, protocol, port } = req.body;
+  if ((protocol === "Modbus TCP" || protocol === "Modbus RTU") && ip) {
+    const modbusTest = require("./modbus-test");
+    const reg = registerMap?.weight || {};
+    const result = await modbusTest.testDatapoint({
+      ip,
+      port: port || 502,
+      register: reg.register || 0,
+      registerLen: reg.len || 2,
+      scaleFactor: reg.scaleFactor || 1,
+      byteOrder: reg.byteOrder || "littleEndian",
+      weightFormat: reg.weightFormat || "float32",
+      unit: unit || "kg",
+    });
+    return res.json(result);
+  }
+  // Simulated fallback for other protocols
   const start = Date.now();
   await new Promise((r) => setTimeout(r, 100 + Math.random() * 150));
   const latencyMs = Date.now() - start;
@@ -1080,7 +1129,7 @@ app.post("/api/engineering/test-datapoint", requireRole("manager"), ah(async (re
     rawValue: success ? simulatedValue : null,
     parsedValue: success ? simulatedValue : null,
     unit: unit || "kg",
-    message: success ? "Data point read successfully (simulated)" : "No weight data point configured",
+    message: success ? `Data point read OK (${protocol || "simulated"})` : "No weight data point configured",
   });
 }));
 
@@ -1624,23 +1673,11 @@ app.delete("/api/sso/providers/:id", requireRole("admin"), ah(async (req, res) =
 }));
 
 app.post("/api/sso/login", ah(async (req, res) => {
-  const { provider: providerName, token, email, name: ssoName, role: ssoRole } = req.body;
-  if (!providerName) return res.status(400).json({ error: "provider required" });
-  const provider = await store.findSSOProviderByName(providerName);
-  if (!provider) return res.status(401).json({ error: "SSO provider not found or disabled" });
-
-  // In production: validate token against provider's OIDC/SAML endpoint
-  // For now: accept the token as-is and map email to a user
-  const ssoEmail = email || `sso_${providerName}@sso.local`;
-  let user = await store.findUserByUsername(ssoEmail);
-  if (!user) {
-    user = await store.createUser(ssoEmail, Math.random().toString(36).slice(2, 14), ssoRole || provider.defaultRole || "viewer");
-  }
-
-  const sessionToken = auth.createSessionToken(user);
-  await store.logConsent(user.id, "sso_login", `SSO login via ${providerName}`, req.ip);
-  audit(req, "sso_login", { userId: user.id, provider: providerName });
-  res.json({ token: sessionToken, user: { id: user.id, username: user.username, role: user.role } });
+  // SSO login is not yet implemented — returning 501 to prevent auth bypass.
+  // The previous version accepted arbitrary {provider, email, role} without
+  // verifying the token against the provider's OIDC/SAML endpoint, which
+  // would have allowed anyone to create sessions as any user/role.
+  res.status(501).json({ error: "SSO login not implemented. Use /api/auth/login instead." });
 }));
 
 // ---------- Device Permissions ----------
@@ -2172,38 +2209,73 @@ app.get("/api/usage/my", requireUserMw, ah(async (req, res) => {
 
 // ---------- Dashboard Views ----------
 app.get("/api/dashboard-views", requireUserMw, ah(async (req, res) => {
-  res.json(await store.listDashboardViews());
+  res.json(await store.listDashboardViews(req.user.id));
 }));
 
-app.post("/api/dashboard-views", requireRole("manager"), ah(async (req, res) => {
-  const { name } = req.body;
+app.post("/api/dashboard-views", requireUserMw, ah(async (req, res) => {
+  const { name, shared } = req.body;
   if (!name) return res.status(400).json({ error: "name required" });
-  const view = await store.addDashboardView(name, req.user.username);
+  // Any user can create personal views; only manager+ can create shared views
+  const isManager = ROLE_RANK[req.user.role] >= ROLE_RANK["manager"];
+  const userId = shared && isManager ? null : req.user.id;
+  const view = await store.addDashboardView(name, req.user.username, userId);
   res.status(201).json(view);
 }));
 
-app.delete("/api/dashboard-views/:id", requireRole("manager"), ah(async (req, res) => {
+app.delete("/api/dashboard-views/:id", requireUserMw, ah(async (req, res) => {
+  const views = await store.listDashboardViews(req.user.id);
+  const view = views.find(v => v.id === req.params.id);
+  if (!view) return res.status(404).json({ error: "view not found" });
+  if (view.isDefault) return res.status(400).json({ error: "cannot delete default view" });
+  // Personal views: owner can delete. Shared views: manager+ can delete.
+  if (view.userId && view.userId !== req.user.id) return res.status(403).json({ error: "not your view" });
+  if (!view.userId && ROLE_RANK[req.user.role] < ROLE_RANK["manager"]) return res.status(403).json({ error: "requires manager role" });
   await store.removeDashboardView(req.params.id);
   res.status(204).end();
+}));
+
+app.post("/api/dashboard-views/:id/duplicate", requireUserMw, ah(async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: "name required" });
+  try {
+    const view = await store.duplicateDashboardView(req.params.id, name, req.user.id);
+    res.status(201).json(view);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 }));
 
 app.get("/api/dashboard-views/:id/widgets", requireUserMw, ah(async (req, res) => {
   res.json(await store.getDashboardWidgets(req.params.id));
 }));
 
-app.post("/api/dashboard-views/:id/widgets", requireRole("manager"), ah(async (req, res) => {
-  const { deviceId, metric } = req.body;
+app.post("/api/dashboard-views/:id/widgets", requireUserMw, ah(async (req, res) => {
+  const { deviceId, metric, x, y, w, h, scopeType, scopeId, config } = req.body;
   if (!deviceId || !metric) return res.status(400).json({ error: "deviceId and metric required" });
-  const widget = await store.addDashboardWidget(req.params.id, deviceId, metric);
+  const widget = await store.addDashboardWidget(req.params.id, { deviceId, metric, x, y, w, h, scopeType, scopeId, config });
   res.status(201).json(widget);
 }));
 
-app.delete("/api/dashboard-widgets/:id", requireRole("manager"), ah(async (req, res) => {
+app.put("/api/dashboard-widgets/:id", requireUserMw, ah(async (req, res) => {
+  await store.updateDashboardWidget(req.params.id, req.body);
+  res.json({ ok: true });
+}));
+
+app.put("/api/dashboard-widgets/:id/batch", requireUserMw, ah(async (req, res) => {
+  const { widgets } = req.body;
+  if (!Array.isArray(widgets)) return res.status(400).json({ error: "widgets array required" });
+  for (const w of widgets) {
+    if (w.id) await store.updateDashboardWidget(w.id, w);
+  }
+  res.json({ ok: true });
+}));
+
+app.delete("/api/dashboard-widgets/:id", requireUserMw, ah(async (req, res) => {
   await store.removeDashboardWidget(req.params.id);
   res.status(204).end();
 }));
 
-app.put("/api/dashboard-views/:id/reorder", requireRole("manager"), ah(async (req, res) => {
+app.put("/api/dashboard-views/:id/reorder", requireUserMw, ah(async (req, res) => {
   const { widgetIds } = req.body;
   if (!Array.isArray(widgetIds)) return res.status(400).json({ error: "widgetIds array required" });
   await store.reorderDashboardWidgets(req.params.id, widgetIds);
