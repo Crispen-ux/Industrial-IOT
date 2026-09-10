@@ -627,9 +627,9 @@ const store = {
     }
   },
   async acknowledgeAlert(id, username) {
-    await db.query("UPDATE alert_history SET acknowledged_by = $2, acknowledged_at = now() WHERE id = $1", [id, username]);
+    await db.query("UPDATE alert_history SET acknowledged_by = $2, acknowledged_at = now(), active = false, resolved_at = now() WHERE id = $1", [id, username]);
     for (const [key, alert] of activeAlerts) {
-      if (alert.id === id) { alert.acknowledgedBy = username; alert.acknowledgedAt = new Date().toISOString(); }
+      if (alert.id === id) { activeAlerts.delete(key); }
     }
   },
   async isAlertSnoozed(id) {

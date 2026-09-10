@@ -1555,7 +1555,8 @@ app.post("/api/alerts/:id/snooze", requireUserMw, ah(async (req, res) => {
 }));
 
 app.post("/api/alerts/:id/acknowledge", requireUserMw, ah(async (req, res) => {
-  await store.acknowledgeAlert(req.params.id, req.user.username);
+  const alert = await store.acknowledgeAlert(req.params.id, req.user.username);
+  broadcast({ type: "alert", action: "resolve", alert: { id: req.params.id } });
   audit(req, "alert_acknowledge", { id: req.params.id });
   res.json({ ok: true });
 }));
