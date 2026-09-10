@@ -6159,3 +6159,5 @@ function renderDocTroubleshooting() {
     </div>
   `;
 }
+
+boot();
