@@ -8,6 +8,10 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
-    "node-fetch": "^2.7.0"
+    "modbus-serial": "^8.0.25",
+    "mqtt": "^5.15.2",
+    "node-fetch": "^2.7.0",
+    "serialport": "^13.0.0",
+    "snmp-native": "^1.2.0"
   }
 }

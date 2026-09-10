@@ -1,5 +1,5 @@
 const API = "";
-const PROTOCOLS = ["Modbus TCP", "OPC-UA", "REST API", "MQTT"];
+const PROTOCOLS = ["Simulator", "Modbus TCP", "Modbus RTU", "OPC-UA", "MQTT", "EtherNet/IP", "PROFINET", "S7", "SNMP", "REST API", "TCP Socket", "Serial", "RS232", "RS485"];
 const METRICS = [
   { id: "live_weight", label: "Live weight" },
   { id: "trend", label: "Weight trend" },
@@ -3298,9 +3298,85 @@ function renderWizard() {
       <div style="margin-bottom:14px;"><label>Template</label><select onchange="wizardApplyTemplate(this.value)"><option value="">Manual config</option>${templates.map(t => `<option value="${t.id}" ${t.id === wizardData.templateId ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;">
         <div><label>Protocol</label><select onchange="wizardSetProtocolManually(this.value)">${PROTOCOLS.map(p => `<option value="${p}" ${p === wizardData.protocol ? "selected" : ""}>${p}</option>`).join("")}</select></div>
-        <div><label>Port</label><input value="${wizardData.port ?? ""}" oninput="wizardData.port=this.value" /></div>
-        <div><label>Polling (ms)</label><input value="${wizardData.pollingMs}" oninput="wizardData.pollingMs=this.value" /></div>
-      </div>`;
+        <div><label>IP Address</label><input value="${esc(wizardData.ip || "")}" oninput="wizardData.ip=this.value" placeholder="192.168.1.100" /></div>
+        <div><label>Port</label><input value="${wizardData.port ?? ""}" oninput="wizardData.port=this.value" placeholder="${wizardData.protocol?.includes('Modbus') ? '502' : wizardData.protocol === 'OPC-UA' ? '4840' : wizardData.protocol === 'MQTT' ? '1883' : wizardData.protocol === 'SNMP' ? '161' : '8080'}" /></div>
+      </div>
+      ${wizardData.protocol?.includes('Modbus') ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Unit ID</label><input value="${wizardData.modbusUnitId || 1}" oninput="wizardData.modbusUnitId=this.value" placeholder="1" /></div>
+        <div><label>Connection</label><select onchange="wizardData.connectionType=this.value"><option value="tcp">TCP</option><option value="rtu">Serial (RTU)</option></select></div>
+        <div><label>Weight Format</label><select onchange="wizardData.weightFormat=this.value"><option value="float32">Float32</option><option value="int32">Int32</option><option value="int16">Int16</option><option value="bcd">BCD</option></select></div>
+      </div>
+      ${wizardData.connectionType === 'rtu' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Serial Port</label><input value="${wizardData.serialPort || ''}" oninput="wizardData.serialPort=this.value" placeholder="/dev/ttyUSB0" /></div>
+        <div><label>Baud Rate</label><select onchange="wizardData.baudRate=this.value"><option value="9600">9600</option><option value="19200">19200</option><option value="38400">38400</option><option value="57600">57600</option><option value="115200">115200</option></select></div>
+        <div><label>Parity</label><select onchange="wizardData.serialParity=this.value"><option value="none">None</option><option value="even">Even</option><option value="odd">Odd</option></select></div>
+      </div>` : ""}` : ""}
+      ${wizardData.protocol === 'OPC-UA' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px;">
+        <div><label>Weight Node ID</label><input value="${wizardData.opcuaWeightNode || 'ns=2;s=Weight'}" oninput="wizardData.opcuaWeightNode=this.value" placeholder="ns=2;s=Weight" /></div>
+        <div><label>Status Node ID</label><input value="${wizardData.opcuaStatusNode || 'ns=2;s=Status'}" oninput="wizardData.opcuaStatusNode=this.value" placeholder="ns=2;s=Status" /></div>
+      </div>` : ""}
+      ${wizardData.protocol === 'MQTT' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px;">
+        <div><label>Broker URL</label><input value="${wizardData.mqttBroker || ''}" oninput="wizardData.mqttBroker=this.value" placeholder="mqtt://broker.hivemq.com:1883" /></div>
+        <div><label>Topic</label><input value="${wizardData.mqttTopic || 'scale/weight'}" oninput="wizardData.mqttTopic=this.value" placeholder="scale/weight" /></div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px;">
+        <div><label>Username (optional)</label><input value="${wizardData.mqttUsername || ''}" oninput="wizardData.mqttUsername=this.value" /></div>
+        <div><label>Password (optional)</label><input type="password" value="${wizardData.mqttPassword || ''}" oninput="wizardData.mqttPassword=this.value" /></div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Weight Field</label><input value="${wizardData.mqttWeightField || 'weight'}" oninput="wizardData.mqttWeightField=this.value" /></div>
+        <div><label>Phase Field</label><input value="${wizardData.mqttPhaseField || 'phase'}" oninput="wizardData.mqttPhaseField=this.value" /></div>
+        <div><label>Bag Count Field</label><input value="${wizardData.mqttBagCountField || 'bagCount'}" oninput="wizardData.mqttBagCountField=this.value" /></div>
+      </div>` : ""}
+      ${wizardData.protocol === 'EtherNet/IP' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Weight Tag</label><input value="${wizardData.enipWeightTag || 'Weight'}" oninput="wizardData.enipWeightTag=this.value" /></div>
+        <div><label>Status Tag</label><input value="${wizardData.enipStatusTag || 'Status'}" oninput="wizardData.enipStatusTag=this.value" /></div>
+        <div><label>Bag Count Tag</label><input value="${wizardData.enipBagCountTag || 'BagCount'}" oninput="wizardData.enipBagCountTag=this.value" /></div>
+      </div>` : ""}
+      ${wizardData.protocol === 'PROFINET' || wizardData.protocol === 'S7' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Rack</label><input value="${wizardData.s7Rack || 0}" oninput="wizardData.s7Rack=this.value" /></div>
+        <div><label>Slot</label><input value="${wizardData.s7Slot || 1}" oninput="wizardData.s7Slot=this.value" /></div>
+        <div><label>DB Number</label><input value="${wizardData.s7DbNumber || 1}" oninput="wizardData.s7DbNumber=this.value" /></div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Weight Start (byte)</label><input value="${wizardData.s7WeightStart || 0}" oninput="wizardData.s7WeightStart=this.value" /></div>
+        <div><label>Status Start (byte)</label><input value="${wizardData.s7StatusStart || 4}" oninput="wizardData.s7StatusStart=this.value" /></div>
+        <div><label>Bag Count Start (byte)</label><input value="${wizardData.s7BagCountStart || 6}" oninput="wizardData.s7BagCountStart=this.value" /></div>
+      </div>` : ""}
+      ${wizardData.protocol === 'SNMP' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px;">
+        <div><label>Weight OID</label><input value="${wizardData.snmpWeightOid || ''}" oninput="wizardData.snmpWeightOid=this.value" placeholder="1.3.6.1.4.1.2020.1.1.1.0" /></div>
+        <div><label>Community</label><input value="${wizardData.snmpCommunity || 'public'}" oninput="wizardData.snmpCommunity=this.value" /></div>
+      </div>` : ""}
+      ${wizardData.protocol === 'REST API' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px;">
+        <div><label>API URL</label><input value="${wizardData.restUrl || ''}" oninput="wizardData.restUrl=this.value" placeholder="http://192.168.1.100/api/weight" /></div>
+        <div><label>Method</label><select onchange="wizardData.restMethod=this.value"><option value="GET">GET</option><option value="POST">POST</option></select></div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Weight Field</label><input value="${wizardData.restWeightField || 'weight'}" oninput="wizardData.restWeightField=this.value" /></div>
+        <div><label>Auth Type</label><select onchange="wizardData.restAuthType=this.value"><option value="none">None</option><option value="bearer">Bearer Token</option><option value="basic">Basic Auth</option></select></div>
+        <div><label>Token</label><input type="password" value="${wizardData.restAuthToken || ''}" oninput="wizardData.restAuthToken=this.value" /></div>
+      </div>` : ""}
+      ${wizardData.protocol === 'TCP Socket' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px;">
+        <div><label>TCP Port</label><input value="${wizardData.tcpPort || 8080}" oninput="wizardData.tcpPort=this.value" /></div>
+        <div><label>Delimiter</label><select onchange="wizardData.tcpDelimiter=this.value"><option value="\r\n">CR+LF</option><option value="\n">LF</option><option value=",">Comma</option></select></div>
+      </div>
+      <div style="margin-top:8px;"><label>Parse Regex</label><input value="${wizardData.tcpParseRegex || '([\\d.]+)'}" oninput="wizardData.tcpParseRegex=this.value" placeholder="([\\d.]+)" style="width:100%;" /></div>` : ""}
+      ${wizardData.protocol?.includes('Serial') || wizardData.protocol === 'RS232' || wizardData.protocol === 'RS485' ? `
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px;">
+        <div><label>Serial Port</label><input value="${wizardData.serialPort || ''}" oninput="wizardData.serialPort=this.value" placeholder="/dev/ttyUSB0" /></div>
+        <div><label>Baud Rate</label><select onchange="wizardData.baudRate=this.value"><option value="9600">9600</option><option value="19200">19200</option><option value="38400">38400</option><option value="57600">57600</option><option value="115200">115200</option></select></div>
+        <div><label>Parity</label><select onchange="wizardData.serialParity=this.value"><option value="none">None</option><option value="even">Even</option><option value="odd">Odd</option></select></div>
+      </div>
+      <div style="margin-top:8px;"><label>Parse Regex</label><input value="${wizardData.serialParseRegex || '([\\d.]+)'}" oninput="wizardData.serialParseRegex=this.value" placeholder="([\\d.]+)" style="width:100%;" /></div>` : ""}`;
   } else if (wizardStep === 3) {
     const r = wizardData.connResult;
     stepContent = `<div style="font-size:13px;color:#8B95A1;margin-bottom:14px;">Testing ${esc(wizardData.ip)} over ${wizardData.protocol}.</div>
@@ -3308,17 +3384,21 @@ function renderWizard() {
       ${r && r.loading ? `<div style="margin-top:12px;color:#8B95A1;">Testing…</div>` : ""}
       ${r && !r.loading ? `<div class="result-box ${r.success ? "success" : "error"}">${r.success ? "✓" : "✕"} ${esc(r.message)} (${r.latencyMs}ms)</div>` : ""}`;
   } else if (wizardStep === 4) {
-    const rm = wizardData.registerMap.weight || {};
+    const r = wizardData.registerMap.weight || {};
     const p = wizardData.protocol;
-    let aLabel, aPlaceholder, bLabel;
-    if (p === "Modbus TCP") { aLabel = "Register"; aPlaceholder = "40001"; bLabel = "Data type"; }
-    else if (p === "OPC-UA") { aLabel = "Node ID"; aPlaceholder = "ns=2;s=Weight"; bLabel = "Data type"; }
-    else if (p === "REST API") { aLabel = "Path"; aPlaceholder = "/api/weight"; bLabel = "JSON field"; }
-    else { aLabel = "Topic"; aPlaceholder = "scale/weight"; bLabel = "Data type"; }
-    stepContent = `<div style="font-size:13px;color:#8B95A1;margin-bottom:14px;">Configure the weight data point.</div>
+    let aLabel, aPlaceholder, bLabel, bPlaceholder;
+    if (p === "Modbus TCP" || p === "Modbus RTU") { aLabel = "Weight Register"; aPlaceholder = "0"; bLabel = "Scale Factor"; bPlaceholder = "1"; }
+    else if (p === "OPC-UA") { aLabel = "Weight Node ID"; aPlaceholder = "ns=2;s=Weight"; bLabel = "Status Node ID"; bPlaceholder = "ns=2;s=Status"; }
+    else if (p === "REST API") { aLabel = "Weight JSON Field"; aPlaceholder = "weight"; bLabel = "Phase Field"; bPlaceholder = "phase"; }
+    else if (p === "MQTT") { aLabel = "Weight Field"; aPlaceholder = "weight"; bLabel = "Phase Field"; bPlaceholder = "phase"; }
+    else if (p === "EtherNet/IP") { aLabel = "Weight Tag"; aPlaceholder = "Weight"; bLabel = "Status Tag"; bPlaceholder = "Status"; }
+    else if (p === "PROFINET" || p === "S7") { aLabel = "Weight Byte Offset"; aPlaceholder = "0"; bLabel = "Status Byte Offset"; bPlaceholder = "4"; }
+    else if (p === "SNMP") { aLabel = "Weight OID"; aPlaceholder = "1.3.6.1.4.1.2020.1.1.1.0"; bLabel = "Status OID"; bPlaceholder = "1.3.6.1.4.1.2020.1.1.2.0"; }
+    else { aLabel = "Parse Pattern"; aPlaceholder = "([\\d.]+)"; bLabel = "Unit"; bPlaceholder = "kg"; }
+    stepContent = `<div style="font-size:13px;color:#8B95A1;margin-bottom:14px;">Configure the weight data point for ${esc(p)}.</div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr;">
-        <div><label>${aLabel}</label><input id="wz-dp-a" value="${esc(rm.register || rm.nodeId || rm.path || rm.topic || "")}" placeholder="${aPlaceholder}" /></div>
-        <div><label>${bLabel}</label><input id="wz-dp-b" value="${esc(rm.dataType || rm.jsonField || "Float32")}" /></div>
+        <div><label>${aLabel}</label><input id="wz-dp-a" value="${esc(r.register || r.nodeId || r.path || r.topic || r.field || r.weightOid || "")}" placeholder="${aPlaceholder}" /></div>
+        <div><label>${bLabel}</label><input id="wz-dp-b" value="${esc(r.statusNode || r.phaseField || r.statusOid || r.scaleFactor || "")}" placeholder="${bPlaceholder}" /></div>
       </div>`;
   } else if (wizardStep === 5) {
     const r = wizardData.dpResult;

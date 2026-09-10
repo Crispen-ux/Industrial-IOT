@@ -1510,6 +1510,26 @@ app.get("/api/device-health", requireRole("operator"), ah(async (req, res) => {
   res.json(await store.getDeviceHealthScores());
 }));
 
+// ---------- Supported Protocols ----------
+app.get("/api/protocols", requireUserMw, ah(async (req, res) => {
+  let protocols;
+  try { protocols = require("../gateway/drivers").getSupportedProtocols(); } catch (e) { protocols = ["Simulator"]; }
+  const details = {
+    "Simulator": { label: "Simulator", category: "Test", description: "Virtual scale for testing" },
+    "Modbus TCP": { label: "Modbus TCP", category: "Industrial", description: "Mettler Toledo, A&D, Fairbanks, Rice Lake" },
+    "Modbus RTU": { label: "Modbus RTU (Serial)", category: "Industrial", description: "RS485/RS232 Modbus scales" },
+    "OPC-UA": { label: "OPC-UA", category: "Industrial", description: "Siemens, Rockwell, ABB, Schneider" },
+    MQTT: { label: "MQTT", category: "IoT", description: "AWS IoT, Azure, Mosquitto, HiveMQ" },
+    "EtherNet/IP": { label: "EtherNet/IP", category: "Industrial", description: "Allen-Bradley / Rockwell PLCs" },
+    PROFINET: { label: "PROFINET / S7", category: "Industrial", description: "Siemens S7-300/400/1200/1500" },
+    SNMP: { label: "SNMP", category: "Network", description: "Network scales, printers, managed devices" },
+    "REST API": { label: "REST / HTTP API", category: "Cloud", description: "Cloud scales, smart sensors, vendor APIs" },
+    "TCP Socket": { label: "TCP Socket", category: "Legacy", description: "Raw TCP data from scales and scanners" },
+    Serial: { label: "Serial / RS232 / RS485", category: "Legacy", description: "Legacy weigh terminals, barcode scanners" },
+  };
+  res.json(protocols.map(p => ({ id: p, ...(details[p] || { label: p, category: "Other", description: "" }) })));
+}));
+
 // ---------- Batch / Lot Tracking ----------
 app.get("/api/batches", requireRole("operator"), ah(async (req, res) => {
   res.json(await store.listBatches(req.query.status));
