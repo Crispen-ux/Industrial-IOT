@@ -73,6 +73,187 @@ let wizardData = {
   createdDevice: null,
 };
 
+// ============================================================
+// REUSABLE UI COMPONENTS
+// ============================================================
+
+// Toast notification system
+let toastQueue = [];
+let toastTimer = null;
+
+function showToast(message, type = "info", duration = 3000) {
+  let container = document.getElementById("toast-container");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toast-container";
+    container.className = "toast-container";
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<span>${esc(message)}</span>`;
+  container.appendChild(toast);
+  setTimeout(() => toast.classList.add("toast-show"), 10);
+  setTimeout(() => {
+    toast.classList.remove("toast-show");
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+// Override the existing toast() function if it exists
+// The app already has a toast() function - we need to find and update it
+
+// Modal dialog system
+let activeModal = null;
+
+function openModal(options) {
+  closeModal();
+  const { title, subtitle, body, footer, size = "md", onClose } = options;
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+  
+  const sizeClass = size === "sm" ? "modal-sm" : size === "lg" ? "modal-lg" : "";
+  overlay.innerHTML = `
+    <div class="modal-content ${sizeClass}">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">${title || ""}</h3>
+          ${subtitle ? `<div class="modal-subtitle">${subtitle}</div>` : ""}
+        </div>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">${body || ""}</div>
+      ${footer ? `<div class="modal-footer">${footer}</div>` : ""}
+    </div>`;
+  
+  document.body.appendChild(overlay);
+  activeModal = { overlay, onClose };
+  setTimeout(() => overlay.classList.add("modal-show"), 10);
+  
+  // ESC to close
+  const escHandler = (e) => { if (e.key === "Escape") { closeModal(); document.removeEventListener("keydown", escHandler); } };
+  document.addEventListener("keydown", escHandler);
+  
+  // Focus first input
+  setTimeout(() => {
+    const firstInput = overlay.querySelector("input, select, textarea");
+    if (firstInput) firstInput.focus();
+  }, 100);
+}
+
+function closeModal() {
+  if (activeModal) {
+    activeModal.overlay.classList.remove("modal-show");
+    setTimeout(() => {
+      activeModal.overlay.remove();
+      if (activeModal.onClose) activeModal.onClose();
+      activeModal = null;
+    }, 200);
+  }
+}
+
+// Confirm dialog (replaces window.confirm)
+function showConfirm(options) {
+  return new Promise((resolve) => {
+    const { title = "Confirm", message, confirmText = "Confirm", cancelText = "Cancel", danger = false } = typeof options === "string" ? { message: options } : options;
+    openModal({
+      title,
+      size: "sm",
+      body: `<p style="color:#8B949E;font-size:14px;line-height:1.5;">${esc(message)}</p>`,
+      footer: `
+        <button class="btn btn-secondary" onclick="closeModal(); window._confirmResolve(false);">${esc(cancelText)}</button>
+        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" onclick="closeModal(); window._confirmResolve(true);">${esc(confirmText)}</button>`,
+      onClose: () => { window._confirmResolve = null; resolve(false); }
+    });
+    window._confirmResolve = resolve;
+  });
+}
+
+// Prompt dialog (replaces window.prompt)
+function showPrompt(options) {
+  return new Promise((resolve) => {
+    const { title = "Input", label, placeholder = "", defaultValue = "", type = "text" } = typeof options === "string" ? { label: options } : options;
+    const inputId = "prompt-input-" + Date.now();
+    openModal({
+      title,
+      size: "sm",
+      body: `
+        <div class="form-group">
+          <label class="form-label">${esc(label)}</label>
+          <input class="form-input" id="${inputId}" type="${type}" value="${esc(defaultValue)}" placeholder="${esc(placeholder)}" />
+        </div>`,
+      footer: `
+        <button class="btn btn-secondary" onclick="closeModal(); window._promptResolve(null);">Cancel</button>
+        <button class="btn btn-primary" onclick="window._promptResolve(document.getElementById('${inputId}').value); closeModal();">OK</button>`,
+      onClose: () => { window._promptResolve = null; resolve(null); }
+    });
+    // Enter to submit
+    setTimeout(() => {
+      const input = document.getElementById(inputId);
+      if (input) {
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { window._promptResolve(input.value); closeModal(); }
+        });
+      }
+    }, 150);
+  });
+}
+
+// Multi-field prompt (replaces chained window.prompt calls)
+function showFormModal(options) {
+  return new Promise((resolve) => {
+    const { title, subtitle, fields, submitText = "Create", cancelText = "Cancel", danger = false } = options;
+    const fieldsHtml = fields.map(f => {
+      const id = "form-field-" + f.name;
+      if (f.type === "select") {
+        return `<div class="form-group">
+          <label class="form-label">${esc(f.label)}</label>
+          <select class="form-select" id="${id}">${f.options.map(o => `<option value="${esc(o.value)}" ${o.value === f.defaultValue ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>
+        </div>`;
+      }
+      if (f.type === "textarea") {
+        return `<div class="form-group">
+          <label class="form-label">${esc(f.label)}</label>
+          <textarea class="form-textarea" id="${id}" placeholder="${esc(f.placeholder || "")}" rows="3">${esc(f.defaultValue || "")}</textarea>
+        </div>`;
+      }
+      return `<div class="form-group">
+        <label class="form-label">${esc(f.label)}</label>
+        <input class="form-input" id="${id}" type="${f.type || 'text'}" value="${esc(f.defaultValue || "")}" placeholder="${esc(f.placeholder || "")}" ${f.required ? 'required' : ''} />
+      </div>`;
+    }).join("");
+    
+    openModal({
+      title,
+      subtitle,
+      body: `<form id="modal-form" onsubmit="event.preventDefault(); window._formSubmitHandler();">${fieldsHtml}</form>`,
+      footer: `
+        <button class="btn btn-secondary" onclick="closeModal(); window._formResolve(null);">${esc(cancelText)}</button>
+        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" onclick="window._formSubmitHandler();">${esc(submitText)}</button>`,
+      onClose: () => { window._formResolve = null; resolve(null); }
+    });
+    
+    window._formSubmitHandler = () => {
+      const values = {};
+      for (const f of fields) {
+        const el = document.getElementById("form-field-" + f.name);
+        values[f.name] = el ? el.value : null;
+      }
+      // Validate required fields
+      for (const f of fields) {
+        if (f.required && !values[f.name]) {
+          const el = document.getElementById("form-field-" + f.name);
+          if (el) el.style.borderColor = "#E5484D";
+          return;
+        }
+      }
+      closeModal();
+      resolve(values);
+    };
+  });
+}
+
 // ---------- Role helpers ----------
 
 function hasRole(minRole) {
@@ -382,7 +563,7 @@ async function removeDevice(id) {
 }
 
 async function resetDeviceStats(id) {
-  if (!confirm("Reset give-away/loss stats for this device?")) return;
+  if (!await showConfirm({ title: "Reset Stats", message: "Reset give-away/loss stats for this device?", danger: false })) return;
   try {
     await authFetch(`${API}/api/devices/${id}/reset-stats`, { method: "POST" });
     await loadInitial();
@@ -393,7 +574,7 @@ async function resetDeviceStats(id) {
 // Old addWidget/removeWidget replaced by dashboard_views system — see addWidgetDialog/removeWidget below
 
 async function createGatewayKey() {
-  const label = prompt("Label for this gateway key:", "gateway");
+  const label = await showPrompt({ title: "Create Gateway Key", label: "Label for this gateway key:", defaultValue: "gateway" });
   if (label === null) return;
   try {
     const res = await authFetch(`${API}/api/gateway-keys`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: label || "gateway" }) });
@@ -405,7 +586,7 @@ async function createGatewayKey() {
 }
 
 async function revokeGatewayKey(id) {
-  if (!confirm("Revoke this gateway key?")) return;
+  if (!await showConfirm({ title: "Revoke Gateway Key", message: "Revoke this gateway key?", danger: true })) return;
   try {
     await authFetch(`${API}/api/gateway-keys/${id}`, { method: "DELETE" });
     await loadInitial();
@@ -441,7 +622,7 @@ async function changeUserRole(id, role) {
 }
 
 async function deleteUser(id) {
-  if (!confirm("Remove this user?")) return;
+  if (!await showConfirm({ title: "Remove User", message: "Remove this user?", danger: true })) return;
   try {
     await authFetch(`${API}/api/users/${id}`, { method: "DELETE" });
     await loadInitial();
@@ -478,7 +659,7 @@ async function addScheduledReport() {
 }
 
 async function deleteScheduledReport(id) {
-  if (!confirm("Delete this scheduled report?")) return;
+  if (!await showConfirm({ title: "Delete Scheduled Report", message: "Delete this scheduled report?", danger: true })) return;
   try {
     await authFetch(`${API}/api/scheduled-reports/${id}`, { method: "DELETE" });
     scheduledReports = scheduledReports.filter(r => r.id !== id);
@@ -495,7 +676,7 @@ async function runScheduledReport(id) {
 }
 
 async function removeProduct(id) {
-  if (!confirm("Delete this product?")) return;
+  if (!await showConfirm({ title: "Delete Product", message: "Delete this product?", danger: true })) return;
   try {
     await authFetch(`${API}/api/products/${id}`, { method: "DELETE" });
     await loadInitial();
@@ -512,7 +693,7 @@ async function toggleProductStatus(id, currentStatus) {
 }
 
 async function removeMaintenanceRecord(id) {
-  if (!confirm("Delete this maintenance record?")) return;
+  if (!await showConfirm({ title: "Delete Maintenance Record", message: "Delete this maintenance record?", danger: true })) return;
   try {
     await authFetch(`${API}/api/maintenance/${id}`, { method: "DELETE" });
     await loadInitial();
@@ -523,9 +704,17 @@ async function removeMaintenanceRecord(id) {
 async function updateMaintenanceStatus(id, status) {
   let extra = {};
   if (status === "COMPLETED") {
-    const h = prompt("Labour hours:", "0");
-    const d = prompt("Downtime minutes:", "0");
-    extra = { labourHours: h || 0, downtimeMinutes: d || 0 };
+    const maintenanceExtra = await showFormModal({
+      title: "Complete Maintenance",
+      subtitle: "Enter completion details",
+      fields: [
+        { name: "labourHours", label: "Labour hours:", defaultValue: "0", type: "number" },
+        { name: "downtimeMinutes", label: "Downtime minutes:", defaultValue: "0", type: "number" },
+      ],
+      submitText: "Save"
+    });
+    if (!maintenanceExtra) return;
+    extra = { labourHours: maintenanceExtra.labourHours || 0, downtimeMinutes: maintenanceExtra.downtimeMinutes || 0 };
   }
   try {
     await authFetch(`${API}/api/maintenance/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, ...extra }) });
@@ -535,7 +724,7 @@ async function updateMaintenanceStatus(id, status) {
 }
 
 async function removeCalibrationRecord(id) {
-  if (!confirm("Delete this calibration record?")) return;
+  if (!await showConfirm({ title: "Delete Calibration Record", message: "Delete this calibration record?", danger: true })) return;
   try {
     await authFetch(`${API}/api/calibrations/${id}`, { method: "DELETE" });
     await loadInitial();
@@ -544,7 +733,7 @@ async function removeCalibrationRecord(id) {
 }
 
 async function removeTemplate(id) {
-  if (!confirm("Delete this template?")) return;
+  if (!await showConfirm({ title: "Delete Template", message: "Delete this template?", danger: true })) return;
   try {
     const res = await authFetch(`${API}/api/templates/${id}`, { method: "DELETE" });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
@@ -566,9 +755,18 @@ async function loadSyncPanel() {
 }
 
 async function createSyncKey() {
-  const siteId = prompt("Site ID (letters/numbers/hyphens):");
-  if (!siteId) return;
-  const siteLabel = prompt("Display label:", siteId) || siteId;
+  const syncKeyData = await showFormModal({
+    title: "Create Sync Key",
+    subtitle: "Configure site sync credentials",
+    fields: [
+      { name: "siteId", label: "Site ID (letters/numbers/hyphens):", required: true },
+      { name: "siteLabel", label: "Display label:", placeholder: "Site ID" },
+    ],
+    submitText: "Create"
+  });
+  if (!syncKeyData) return;
+  const siteId = syncKeyData.siteId;
+  const siteLabel = syncKeyData.siteLabel || siteId;
   try {
     const res = await authFetch(`${API}/api/sync-keys`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ siteId, siteLabel }) });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
@@ -579,7 +777,7 @@ async function createSyncKey() {
 }
 
 async function revokeSyncKey(id) {
-  if (!confirm("Revoke this sync key?")) return;
+  if (!await showConfirm({ title: "Revoke Sync Key", message: "Revoke this sync key?", danger: true })) return;
   try {
     await authFetch(`${API}/api/sync-keys/${id}`, { method: "DELETE" });
     await loadSyncPanel();
@@ -628,7 +826,7 @@ async function saveEngineeringConfig() {
   if (!engineeringDeviceId || !hasRole("admin")) return;
   let parsed;
   try { parsed = JSON.parse(document.getElementById("eng-config-json").value); } catch { toast("Invalid JSON.", "error"); return; }
-  if (!confirm("Change live protocol/register configuration?")) return;
+  if (!await showConfirm({ title: "Change Configuration", message: "Change live protocol/register configuration?", danger: true })) return;
   try {
     const res = await authFetch(`${API}/api/engineering/devices/${engineeringDeviceId}/protocol-config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true, connectionConfig: parsed }) });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || "Failed", "error"); return; }
@@ -662,7 +860,7 @@ function openWizard() {
 }
 function closeWizard() { wizardOpen = false; render(); }
 function wizardNext() {
-  if (wizardStep === 1 && (!wizardData.name || !wizardData.ip)) { alert("Name and IP required."); return; }
+  if (wizardStep === 1 && (!wizardData.name || !wizardData.ip)) { showToast("Name and IP required.", "error"); return; }
   if (wizardStep === 4) wizardCaptureRegisterMap();
   wizardStep++; render();
 }
@@ -970,15 +1168,23 @@ function render() {
   app.innerHTML = `
     <div class="mobile-header">
       <button class="hamburger" onclick="toggleMobileSidebar()">☰</button>
-      <h1>${esc(branding.companyName)}</h1>
+      <div class="mobile-brand">
+        <span class="mobile-logo-mark"></span>
+        <h1>${esc(branding.companyName)}</h1>
+      </div>
     </div>
     <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleMobileSidebar()"></div>
     <div class="layout">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-brand">
-          ${branding.logoUrl ? `<img src="${esc(branding.logoUrl)}" alt="logo" />` : ""}
-          <div class="eyebrow">${esc(branding.tagline)}</div>
-          <h1>${esc(branding.companyName)}</h1>
+          <div class="brand-row">
+            ${branding.logoUrl ? `<img src="${esc(branding.logoUrl)}" alt="logo" />` : `<span class="logo-mark"></span>`}
+            <div class="brand-text">
+              <div class="eyebrow">${esc(branding.tagline)}</div>
+              <h1>${esc(branding.companyName)}</h1>
+            </div>
+          </div>
+          <div class="brand-accent-bar"></div>
         </div>
         <nav class="sidebar-nav">
           <div class="nav-section">
@@ -1002,19 +1208,46 @@ function render() {
           </div>` : ""}
         </nav>
         <div class="sidebar-footer">
+          <div class="sidebar-status">
+            <span class="status-dot status-online"></span>
+            <span class="status-label">System Online</span>
+          </div>
+          <div class="sidebar-divider"></div>
           <div style="margin-bottom:8px;">
             <select onchange="setLanguage(this.value)" style="width:100%;padding:4px 8px;border-radius:4px;background:#1B2129;color:#E8EAED;border:1px solid #2A333D;font-size:12px;">
               ${getLanguages().map(l => `<option value="${l}" ${l === currentLang ? "selected" : ""}>${l.toUpperCase()}</option>`).join("")}
             </select>
           </div>
           <div class="user-info">
-            <span>${esc(currentUser?.username)}</span>
-            <span class="user-role">${currentUser?.role}</span>
+            <span class="user-avatar">${esc((currentUser?.username || "?")[0].toUpperCase())}</span>
+            <div class="user-details">
+              <span class="user-name">${esc(currentUser?.username)}</span>
+              <span class="user-role">${currentUser?.role}</span>
+            </div>
           </div>
           <button class="logout-btn" onclick="logout()">Log out</button>
         </div>
       </aside>
       <main class="main" id="main-content">
+        <div class="top-bar-global">
+          <div class="top-bar-global-left">
+            <h2 class="page-title" id="page-title">${esc(branding.companyName)}</h2>
+            <div class="page-subtitle" id="page-subtitle"></div>
+          </div>
+          <div class="top-bar-global-right">
+            <div class="topbar-status">
+              <span class="status-dot status-online"></span>
+              <span class="topbar-status-label">Online</span>
+            </div>
+            <button class="topbar-icon-btn" id="notif-btn" title="Notifications" onclick="navigate('alerts')">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+              ${alertCount > 0 ? `<span class="topbar-notif-badge">${alertCount}</span>` : ""}
+            </button>
+            <div class="topbar-avatar" title="${esc(currentUser?.username)}">
+              ${esc((currentUser?.username || "?")[0].toUpperCase())}
+            </div>
+          </div>
+        </div>
         <div id="alert-banner">${renderAlertBanner()}</div>
         ${wizardOpen ? renderWizard() : ""}
         ${showPasswordChange ? renderPasswordChange() : ""}
@@ -1096,7 +1329,7 @@ async function verify2FA() {
 }
 
 async function disable2FA() {
-  const password = prompt("Enter your password to disable 2FA:");
+  const password = await showPrompt({ title: "Disable 2FA", label: "Enter your password to disable 2FA:", type: "password" });
   if (!password) return;
   try {
     const res = await authFetch(`${API}/api/auth/2fa/disable`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
@@ -1261,7 +1494,7 @@ async function switchDashboardView(viewId) {
 }
 
 async function createDashboardView(shared) {
-  const name = prompt(shared ? "Shared view name:" : "Personal view name:");
+  const name = await showPrompt({ title: shared ? "Create Shared View" : "Create Personal View", label: shared ? "Shared view name:" : "Personal view name:" });
   if (!name) return;
   try {
     const res = await authFetch(`${API}/api/dashboard-views`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, shared }) });
@@ -1276,7 +1509,7 @@ async function createDashboardView(shared) {
 }
 
 async function duplicateDashboardView(viewId) {
-  const name = prompt("Name for duplicated view:");
+  const name = await showPrompt({ title: "Duplicate Dashboard View", label: "Name for duplicated view:" });
   if (!name) return;
   try {
     const res = await authFetch(`${API}/api/dashboard-views/${viewId}/duplicate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
@@ -1290,7 +1523,7 @@ async function duplicateDashboardView(viewId) {
 }
 
 async function deleteDashboardView(viewId) {
-  if (!confirm("Delete this dashboard view?")) return;
+  if (!await showConfirm({ title: "Delete Dashboard View", message: "Delete this dashboard view?", danger: true })) return;
   try {
     await authFetch(`${API}/api/dashboard-views/${viewId}`, { method: "DELETE" });
     dashboardViews = dashboardViews.filter(v => v.id !== viewId);
@@ -1393,12 +1626,20 @@ function renderWidgetContent(widget) {
 }
 
 async function addWidgetDialog() {
-  const deviceId = prompt("Device ID (from Devices page):");
-  if (!deviceId) return;
+  const widgetData = await showFormModal({
+    title: "Add Widget",
+    subtitle: "Select device and metric for the widget",
+    fields: [
+      { name: "deviceId", label: "Device ID (from Devices page):", required: true },
+      { name: "metricIdx", label: `Select metric:\n${METRICS.map((m, i) => `${i + 1}. ${m.label}`).join("\n")}\n\nEnter number (1-${METRICS.length}):`, type: "number", required: true },
+    ],
+    submitText: "Add"
+  });
+  if (!widgetData) return;
+  const deviceId = widgetData.deviceId;
   const device = devices.find(d => d.id === deviceId);
   if (!device) { toast("Device not found", "error"); return; }
-  const metricList = METRICS.map((m, i) => `${i + 1}. ${m.label}`).join("\n");
-  const idx = prompt(`Select metric:\n${metricList}\n\nEnter number (1-${METRICS.length}):`);
+  const idx = widgetData.metricIdx;
   const metricIdx = parseInt(idx) - 1;
   if (isNaN(metricIdx) || metricIdx < 0 || metricIdx >= METRICS.length) { toast("Invalid selection", "error"); return; }
   const metric = METRICS[metricIdx].id;
@@ -1675,7 +1916,7 @@ async function createMaintenanceSchedule() {
 }
 
 async function deleteMaintenanceSchedule(id) {
-  if (!confirm("Delete this schedule?")) return;
+  if (!await showConfirm({ title: "Delete Schedule", message: "Delete this schedule?", danger: true })) return;
   await authFetch(`${API}/api/maintenance-schedules/${id}`, { method: "DELETE" });
   toast("Schedule deleted", "success");
   await loadMaintenanceSchedules();
@@ -1757,7 +1998,7 @@ async function addFailure() {
 }
 
 async function resolveFailure(id) {
-  const resolution = prompt("Describe the resolution:");
+  const resolution = await showPrompt({ title: "Resolve Failure", label: "Describe the resolution:" });
   if (resolution === null) return;
   await authFetch(`${API}/api/maintenance-failures/${id}/resolve`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ resolution }) });
   toast("Failure resolved", "success");
@@ -2407,7 +2648,7 @@ async function updateScheduleStatus(id, status) {
 }
 
 async function completeSchedule(id) {
-  const actualBags = prompt("How many bags were actually filled?", "0");
+  const actualBags = await showPrompt({ title: "Complete Shift", label: "How many bags were actually filled?", defaultValue: "0", type: "number" });
   if (actualBags === null) return;
   await authFetch(`${API}/api/production-schedules/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "completed", actualBags: parseInt(actualBags) || 0, actualEnd: new Date().toISOString() }) });
   toast("Shift completed", "success");
@@ -2415,7 +2656,7 @@ async function completeSchedule(id) {
 }
 
 async function deleteSchedule(id) {
-  if (!confirm("Delete this shift?")) return;
+  if (!await showConfirm({ title: "Delete Shift", message: "Delete this shift?", danger: true })) return;
   await authFetch(`${API}/api/production-schedules/${id}`, { method: "DELETE" });
   await loadProductionSchedules();
 }
@@ -2799,7 +3040,7 @@ async function updatePOStatus(id, status) {
 }
 
 async function deletePO(id) {
-  if (!confirm("Delete this production order?")) return;
+  if (!await showConfirm({ title: "Delete Production Order", message: "Delete this production order?", danger: true })) return;
   await authFetch(`${API}/api/production-orders/${id}`, { method: "DELETE" });
   toast("Order deleted", "success");
   await loadProductionOrders();
@@ -2928,7 +3169,7 @@ async function createShiftTemplate() {
 }
 
 async function deleteShiftTemplate(id) {
-  if (!confirm("Delete this shift template?")) return;
+  if (!await showConfirm({ title: "Delete Shift Template", message: "Delete this shift template?", danger: true })) return;
   await authFetch(`${API}/api/shift-templates/${id}`, { method: "DELETE" });
   toast("Shift template deleted", "success");
   await loadShiftTemplates();
@@ -3022,7 +3263,7 @@ async function createDeviceGroup() {
 }
 
 async function deleteDeviceGroup(id) {
-  if (!confirm("Delete this group? Devices will be ungrouped.")) return;
+  if (!await showConfirm({ title: "Delete Device Group", message: "Delete this group? Devices will be ungrouped.", danger: true })) return;
   try {
     await authFetch(`${API}/api/device-groups/${id}`, { method: "DELETE" });
     await loadDeviceGroups();
@@ -3150,7 +3391,7 @@ function viewDowntime() {
 
 async function assignDowntimeReason(id, reasonCode) {
   if (!reasonCode) return;
-  const note = prompt("Optional note for this downtime event:", "") || "";
+  const note = await showPrompt({ title: "Downtime Reason", label: "Optional note for this downtime event:", defaultValue: "" }) || "";
   try {
     const res = await authFetch(`${API}/api/downtime-logs/${id}/reason`, {
       method: "PUT",
@@ -3308,7 +3549,7 @@ function viewUsers() {
 }
 
 async function anonymizeUser(id, username) {
-  if (!confirm(`Anonymize "${username}"? This replaces their username with a hash and invalidates all sessions.`)) return;
+  if (!await showConfirm({ title: "Anonymize User", message: `Anonymize "${username}"? This replaces their username with a hash and invalidates all sessions.`, danger: true })) return;
   try {
     await authFetch(`${API}/api/gdpr/anonymize/${id}`, { method: "POST" });
     toast("User anonymized", "success");
@@ -3318,8 +3559,8 @@ async function anonymizeUser(id, username) {
 }
 
 async function gdprDeleteUser(id, username) {
-  if (!confirm(`PERMANENTLY DELETE all data for "${username}"? This cannot be undone.`)) return;
-  const confirm2 = prompt(`Type "${username}" to confirm permanent deletion:`);
+  if (!await showConfirm({ title: "Permanently Delete User", message: `PERMANENTLY DELETE all data for "${username}"? This cannot be undone.`, danger: true })) return;
+  const confirm2 = await showPrompt({ title: "Confirm Deletion", label: `Type "${username}" to confirm permanent deletion:` });
   if (confirm2 !== username) { toast("Confirmation mismatch", "error"); return; }
   try {
     await authFetch(`${API}/api/gdpr/delete-user/${id}`, { method: "DELETE" });
@@ -3342,7 +3583,7 @@ async function exportMyData() {
 }
 
 async function requestMyDataDeletion() {
-  if (!confirm("Request deletion of your account and all associated data? An admin must approve.")) return;
+  if (!await showConfirm({ title: "Request Data Deletion", message: "Request deletion of your account and all associated data? An admin must approve.", danger: true })) return;
   try {
     await authFetch(`${API}/api/gdpr/consent`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deletion_request", detail: "User requested GDPR data deletion" }) });
     toast("Deletion request logged. An admin will review.", "success");
@@ -3477,7 +3718,7 @@ async function toggleSSOProvider(id, enabled) {
 }
 
 async function deleteSSOProvider(id, name) {
-  if (!confirm(`Delete SSO provider "${name}"?`)) return;
+  if (!await showConfirm({ title: "Delete SSO Provider", message: `Delete SSO provider "${name}"?`, danger: true })) return;
   try {
     await authFetch(`${API}/api/sso/providers/${id}`, { method: "DELETE" });
     await loadSSOProviders();
@@ -3647,7 +3888,7 @@ async function completeBatch(id) {
 }
 
 async function deleteBatch(id, name) {
-  if (!confirm(`Delete batch "${name}"?`)) return;
+  if (!await showConfirm({ title: "Delete Batch", message: `Delete batch "${name}"?`, danger: true })) return;
   try {
     await authFetch(`${API}/api/batches/${id}`, { method: "DELETE" });
     await loadBatches();
@@ -3797,7 +4038,7 @@ async function predictMLModel(id) {
 }
 
 async function deleteMLModel(id) {
-  if (!confirm("Delete this model?")) return;
+  if (!await showConfirm({ title: "Delete ML Model", message: "Delete this model?", danger: true })) return;
   await authFetch(`${API}/api/ml-models/${id}`, { method: "DELETE" });
   toast("Model deleted", "success");
   await loadMLModels();
@@ -4019,7 +4260,7 @@ async function toggleOrg(id, enabled) {
 }
 
 async function deleteOrg(id, name) {
-  if (!confirm(`Delete organization "${name}"? Users and devices will be unlinked.`)) return;
+  if (!await showConfirm({ title: "Delete Organization", message: `Delete organization "${name}"? Users and devices will be unlinked.`, danger: true })) return;
   try {
     await authFetch(`${API}/api/organizations/${id}`, { method: "DELETE" });
     organizations = await (await authFetch(`${API}/api/organizations`)).json();
@@ -4105,7 +4346,7 @@ async function generateReport(templateId, format) {
 }
 
 async function deleteReportTemplate(id, name) {
-  if (!confirm(`Delete template "${name}"?`)) return;
+  if (!await showConfirm({ title: "Delete Report Template", message: `Delete template "${name}"?`, danger: true })) return;
   try {
     await authFetch(`${API}/api/report-templates/${id}`, { method: "DELETE" });
     reportTemplates = await (await authFetch(`${API}/api/report-templates`)).json();
@@ -4213,7 +4454,7 @@ async function toggleIntegration(id, enabled) {
 }
 
 async function deleteIntegration(id, name) {
-  if (!confirm(`Delete integration "${name}"?`)) return;
+  if (!await showConfirm({ title: "Delete Integration", message: `Delete integration "${name}"?`, danger: true })) return;
   try {
     await authFetch(`${API}/api/integrations/${id}`, { method: "DELETE" });
     integrations = await (await authFetch(`${API}/api/integrations`)).json();
@@ -4288,7 +4529,7 @@ async function createMapping() {
 }
 
 async function deleteMapping(id) {
-  if (!confirm("Delete this mapping?")) return;
+  if (!await showConfirm({ title: "Delete Mapping", message: "Delete this mapping?", danger: true })) return;
   await authFetch(`${API}/api/integration-mappings/${id}`, { method: "DELETE" });
   toast("Mapping deleted", "success");
   await loadIntegrationMappings();
@@ -4354,7 +4595,7 @@ async function testWebhook(id) {
 }
 
 async function deleteWebhook(id) {
-  if (!confirm("Delete this webhook?")) return;
+  if (!await showConfirm({ title: "Delete Webhook", message: "Delete this webhook?", danger: true })) return;
   await authFetch(`${API}/api/webhook-configs/${id}`, { method: "DELETE" });
   toast("Webhook deleted", "success");
   await loadWebhookConfigs();
@@ -4449,7 +4690,7 @@ async function executeImport() {
   // First validate
   const valRes = await authFetch(`${API}/api/import/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ importType, data }) });
   const val = await valRes.json();
-  if (val.errors > 0 && !confirm(`${val.errors} rows have errors. Continue with valid rows?`)) return;
+  if (val.errors > 0 && !await showConfirm(`${val.errors} rows have errors. Continue with valid rows?`)) return;
 
   const res = await authFetch(`${API}/api/import/execute`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobId: val.jobId, data }) });
   const result = await res.json();
@@ -4682,7 +4923,7 @@ function viewSessions() {
 }
 
 async function revokeAllSessions() {
-  if (!confirm("This will sign out all other sessions. Continue?")) return;
+  if (!await showConfirm({ title: "Revoke Sessions", message: "This will sign out all other sessions. Continue?", danger: true })) return;
   try {
     await authFetch(`${API}/api/auth/revoke-sessions`, { method: "POST" });
     toast("Other sessions revoked", "success");
@@ -5062,7 +5303,7 @@ function viewHierarchy() {
 }
 
 async function showCreateSite() {
-  const name = prompt("Site name:");
+  const name = await showPrompt({ title: "Create Site", label: "Site name:" });
   if (!name) return;
   await fetch(`${API}/api/sites`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
   await loadHierarchy();
@@ -5072,7 +5313,7 @@ async function showCreateSite() {
 async function editSite(id) {
   const site = hierarchyData.find(s => s.id === id);
   if (!site) return;
-  const name = prompt("Site name:", site.name);
+  const name = await showPrompt({ title: "Edit Site", label: "Site name:", defaultValue: site.name });
   if (!name) return;
   await fetch(`${API}/api/sites/${id}`, { method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
   await loadHierarchy();
@@ -5080,7 +5321,7 @@ async function editSite(id) {
 }
 
 async function deleteSite(id) {
-  if (!confirm("Delete this site and all its areas/lines/stations?")) return;
+  if (!await showConfirm({ title: "Delete Site", message: "Delete this site and all its areas/lines/stations?", danger: true })) return;
   await fetch(`${API}/api/sites/${id}`, { method: "DELETE", headers: authHeaders() });
   await loadHierarchy();
   render();
@@ -5089,7 +5330,7 @@ async function deleteSite(id) {
 async function editArea(id) {
   const area = hierarchyData.flatMap(s => s.areas || []).find(a => a.id === id);
   if (!area) return;
-  const name = prompt("Area name:", area.name);
+  const name = await showPrompt({ title: "Edit Area", label: "Area name:", defaultValue: area.name });
   if (!name) return;
   await fetch(`${API}/api/areas/${id}`, { method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
   await loadHierarchy();
@@ -5097,7 +5338,7 @@ async function editArea(id) {
 }
 
 async function deleteArea(id) {
-  if (!confirm("Delete this area and all its lines/stations?")) return;
+  if (!await showConfirm({ title: "Delete Area", message: "Delete this area and all its lines/stations?", danger: true })) return;
   await fetch(`${API}/api/areas/${id}`, { method: "DELETE", headers: authHeaders() });
   await loadHierarchy();
   render();
@@ -5106,7 +5347,7 @@ async function deleteArea(id) {
 async function editLine(id) {
   const line = hierarchyData.flatMap(s => (s.areas || []).flatMap(a => a.lines || [])).find(l => l.id === id);
   if (!line) return;
-  const name = prompt("Line name:", line.name);
+  const name = await showPrompt({ title: "Edit Line", label: "Line name:", defaultValue: line.name });
   if (!name) return;
   await fetch(`${API}/api/lines/${id}`, { method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
   await loadHierarchy();
@@ -5114,14 +5355,14 @@ async function editLine(id) {
 }
 
 async function deleteLine(id) {
-  if (!confirm("Delete this line and all its stations?")) return;
+  if (!await showConfirm({ title: "Delete Line", message: "Delete this line and all its stations?", danger: true })) return;
   await fetch(`${API}/api/lines/${id}`, { method: "DELETE", headers: authHeaders() });
   await loadHierarchy();
   render();
 }
 
 async function deleteStation(id) {
-  if (!confirm("Delete this station?")) return;
+  if (!await showConfirm({ title: "Delete Station", message: "Delete this station?", danger: true })) return;
   await fetch(`${API}/api/stations/${id}`, { method: "DELETE", headers: authHeaders() });
   await loadHierarchy();
   render();
@@ -5140,60 +5381,136 @@ async function loadAssetTypes() {
 
 function viewAssetTypes() {
   loadAssetTypes();
-  const types = assetTypes.map(t => `
-    <div class="form-card" style="margin-bottom:12px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span style="display:inline-flex;width:28px;height:28px;border-radius:6px;background:${t.color || '#6366F1'};color:#fff;align-items:center;justify-content:center;font-size:12px;">${(t.icon || '◆')[0]}</span>
+  const categories = [...new Set(assetTypes.map(t => t.category).filter(Boolean))];
+
+  let filtered = [...assetTypes];
+
+  const searchVal = (document.getElementById('asset-type-search') || {}).value || '';
+  if (searchVal) {
+    const q = searchVal.toLowerCase();
+    filtered = filtered.filter(t => (t.name || '').toLowerCase().includes(q) || (t.code || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q));
+  }
+
+  const catFilter = (document.getElementById('asset-type-filter') || {}).value || '';
+  if (catFilter) {
+    filtered = filtered.filter(t => (t.category || '') === catFilter);
+  }
+
+  const sortBy = (document.getElementById('asset-type-sort') || {}).value || 'name';
+  filtered.sort((a, b) => {
+    if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '');
+    if (sortBy === 'category') return (a.category || '').localeCompare(b.category || '');
+    if (sortBy === 'metrics') return ((b.metrics || []).length) - ((a.metrics || []).length);
+    return 0;
+  });
+
+  window._assetTypeSearch = searchVal;
+  window._assetTypeCatFilter = catFilter;
+  window._assetTypeSort = sortBy;
+
+  const types = filtered.map(t => {
+    const metricCount = (t.metrics || []).length;
+    return `
+    <div class="form-card" style="margin-bottom:0;display:flex;flex-direction:column;gap:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span style="display:inline-flex;width:42px;height:42px;border-radius:10px;background:${t.color || '#6366F1'};color:#fff;align-items:center;justify-content:center;font-size:18px;font-weight:600;flex-shrink:0;">${(t.icon || '◆')[0]}</span>
           <div>
-            <strong style="font-size:13px;">${esc(t.name)}</strong>
-            ${t.code ? `<span class="mono" style="color:#5B6673;margin-left:6px;">${esc(t.code)}</span>` : ""}
-            ${t.isSystem ? '<span style="font-size:10px;color:#5B6673;margin-left:6px;">system</span>' : ""}
+            <div style="display:flex;align-items:center;gap:6px;">
+              <strong style="font-size:14px;">${esc(t.name)}</strong>
+              ${t.isSystem ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:#1E2530;color:#5B6673;">System</span>' : ""}
+            </div>
+            ${t.code ? `<div class="mono" style="font-size:12px;color:#5B6673;margin-top:2px;">${esc(t.code)}</div>` : ""}
           </div>
         </div>
-        <div style="display:flex;gap:6px;">
-          ${!t.isSystem ? `<button class="btn btn-sm danger" onclick="deleteAssetType('${t.id}')">Delete</button>` : ""}
-        </div>
+        ${!t.isSystem ? `<button class="btn btn-sm danger" onclick="deleteAssetType('${t.id}')" title="Delete">✕</button>` : ""}
       </div>
-      <div style="font-size:12px;color:#8B95A1;margin-bottom:6px;">${esc(t.description || "")}</div>
-      ${t.metrics && t.metrics.length > 0 ? `
-        <div style="display:flex;flex-wrap:wrap;gap:4px;">
-          ${t.metrics.map(m => `
-            <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:#1E2530;color:#8B95A1;">
-              ${esc(m.displayName)} ${m.unit ? `(${esc(m.unit)})` : ""}
-            </span>
-          `).join("")}
-        </div>
-      ` : ""}
+      ${t.description ? `<div style="font-size:12px;color:#8B95A1;line-height:1.4;">${esc(t.description)}</div>` : ""}
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        ${t.category ? `<span style="font-size:11px;padding:3px 8px;border-radius:4px;background:#1E2530;color:#8B95A1;">${esc(t.category)}</span>` : ""}
+        <span style="font-size:11px;padding:3px 8px;border-radius:4px;background:${metricCount > 0 ? '#4FD18520' : '#1E2530'};color:${metricCount > 0 ? '#4FD185' : '#5B6673'};">${metricCount} metric${metricCount !== 1 ? 's' : ''}</span>
+      </div>
     </div>
-  `).join("");
+    `;
+  }).join("");
 
   return `
     <div class="top-bar">
       <div>
         <h2>Asset Types</h2>
-        <div class="subtitle">Define device types and their metric schemas</div>
+        <div class="subtitle">Define the equipment, machines and systems monitored by the platform.</div>
       </div>
       <div class="top-bar-actions">
-        <button class="btn btn-primary" onclick="showCreateAssetType()">+ New Asset Type</button>
+        <button class="btn btn-primary" onclick="showCreateAssetType()">+ Create Asset Type</button>
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;">
-      ${types || '<div class="form-card"><div style="color:#5B6673;">No asset types defined.</div></div>'}
+    <div class="form-card" style="margin-bottom:16px;">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+        <input class="form-input" id="asset-type-search" type="text" placeholder="Search asset types..." style="flex:1;min-width:200px;" value="${esc(window._assetTypeSearch || '')}" oninput="render()" />
+        <select class="form-select" id="asset-type-filter" style="min-width:160px;" onchange="render()">
+          <option value="">All Categories</option>
+          ${categories.map(c => `<option value="${esc(c)}" ${c === window._assetTypeCatFilter ? 'selected' : ''}>${esc(c)}</option>`).join("")}
+        </select>
+        <select class="form-select" id="asset-type-sort" style="min-width:140px;" onchange="render()">
+          <option value="name" ${window._assetTypeSort === 'name' ? 'selected' : ''}>Sort: Name</option>
+          <option value="category" ${window._assetTypeSort === 'category' ? 'selected' : ''}>Sort: Category</option>
+          <option value="metrics" ${window._assetTypeSort === 'metrics' ? 'selected' : ''}>Sort: Metrics</option>
+        </select>
+      </div>
     </div>
+    ${filtered.length > 0 ? `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;">
+        ${types}
+      </div>
+    ` : `
+      <div class="form-card" style="text-align:center;padding:48px 24px;">
+        <div style="font-size:36px;margin-bottom:12px;opacity:0.3;">📦</div>
+        <div style="font-size:15px;color:#E8EAED;margin-bottom:6px;">No asset types defined</div>
+        <div style="font-size:13px;color:#5B6673;margin-bottom:16px;">Create your first asset type to start defining metrics and monitoring equipment.</div>
+        <button class="btn btn-primary" onclick="showCreateAssetType()">+ Create Asset Type</button>
+      </div>
+    `}
   `;
 }
 
 async function showCreateAssetType() {
-  const name = prompt("Asset type name:");
-  if (!name) return;
-  await authFetch(`${API}/api/asset-types`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  const values = await showFormModal({
+    title: "Create Asset Type",
+    subtitle: "Define a new equipment or system type for monitoring.",
+    submitText: "Create Asset Type",
+    fields: [
+      { name: "name", label: "Asset Type Name", type: "text", required: true, placeholder: "e.g. Centrifugal Pump" },
+      { name: "description", label: "Description", type: "textarea", placeholder: "Describe what this asset type represents..." },
+      { name: "category", label: "Category", type: "select", defaultValue: "", options: [
+        { value: "", label: "Select a category..." },
+        { value: "Equipment", label: "Equipment" },
+        { value: "Sensor", label: "Sensor" },
+        { value: "Controller", label: "Controller" },
+        { value: "Communication", label: "Communication" },
+        { value: "Safety", label: "Safety" },
+        { value: "Utility", label: "Utility" },
+        { value: "Other", label: "Other" }
+      ]},
+      { name: "icon", label: "Icon", type: "text", placeholder: "Motor, Valve, Pump..." }
+    ]
+  });
+  if (!values || !values.name) return;
+  await authFetch(`${API}/api/asset-types`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: values.name,
+      description: values.description || "",
+      category: values.category || "",
+      icon: values.icon || ""
+    })
+  });
   await loadAssetTypes();
   render();
 }
 
 async function deleteAssetType(id) {
-  if (!confirm("Delete this asset type?")) return;
+  if (!await showConfirm({ title: "Delete Asset Type", message: "Delete this asset type?", danger: true })) return;
   await authFetch(`${API}/api/asset-types/${id}`, { method: "DELETE" });
   await loadAssetTypes();
   render();
@@ -5239,7 +5556,7 @@ function viewSensors() {
 }
 
 async function deleteSensor(id) {
-  if (!confirm("Delete this sensor?")) return;
+  if (!await showConfirm({ title: "Delete Sensor", message: "Delete this sensor?", danger: true })) return;
   await fetch(`${API}/api/sensors/${id}`, { method: "DELETE", headers: authHeaders() });
   await loadSensors();
   render();
@@ -5293,14 +5610,20 @@ function viewAlertRules() {
 }
 
 async function showCreateAlertRule() {
-  const name = prompt("Rule name:");
-  if (!name) return;
-  const metric = prompt("Metric name (e.g. weight, temperature, vibration):");
-  if (!metric) return;
-  const operator = prompt("Operator (>, >=, <, <=, ==, !=):", ">");
-  const threshold = prompt("Threshold value:");
-  if (threshold === null) return;
-  const severity = prompt("Severity (info, warning, critical):", "warning");
+  const ruleData = await showFormModal({
+    title: "Create Alert Rule",
+    subtitle: "Define a threshold rule for any metric",
+    fields: [
+      { name: "name", label: "Rule name:", required: true },
+      { name: "metric", label: "Metric name (e.g. weight, temperature, vibration):", required: true },
+      { name: "operator", label: "Operator (>, >=, <, <=, ==, !=):", defaultValue: ">" },
+      { name: "threshold", label: "Threshold value:", type: "number", required: true },
+      { name: "severity", label: "Severity (info, warning, critical):", type: "select", options: [{value:"info",label:"info"},{value:"warning",label:"warning"},{value:"critical",label:"critical"}], defaultValue: "warning" },
+    ],
+    submitText: "Create"
+  });
+  if (!ruleData) return;
+  const { name, metric, operator, threshold, severity } = ruleData;
   await fetch(`${API}/api/alert-rules`, {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -5311,7 +5634,7 @@ async function showCreateAlertRule() {
 }
 
 async function testAlertRule(id) {
-  const deviceId = prompt("Device ID to test against (leave empty for first device):") || devices[0]?.id;
+  const deviceId = await showPrompt({ title: "Test Alert Rule", label: "Device ID to test against (leave empty for first device):" }) || devices[0]?.id;
   if (!deviceId) return;
   const res = await fetch(`${API}/api/alert-rules/${id}/test`, {
     method: "POST",
@@ -5319,11 +5642,11 @@ async function testAlertRule(id) {
     body: JSON.stringify({ deviceId })
   });
   const result = await res.json();
-  alert(result.triggered ? `Rule triggered! ${JSON.stringify(result.triggeredRules)}` : "Rule not triggered with current value");
+  showToast(result.triggered ? `Rule triggered! ${JSON.stringify(result.triggeredRules)}` : "Rule not triggered with current value", "info");
 }
 
 async function deleteAlertRule(id) {
-  if (!confirm("Delete this alert rule?")) return;
+  if (!await showConfirm({ title: "Delete Alert Rule", message: "Delete this alert rule?", danger: true })) return;
   await fetch(`${API}/api/alert-rules/${id}`, { method: "DELETE", headers: authHeaders() });
   alertRules = alertRules.filter(r => r.id !== id);
   render();
