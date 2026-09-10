@@ -1094,6 +1094,7 @@ function render() {
     { id: "devices", label: "Devices", icon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="12" cy="12" r="3"/></svg>` },
     { id: "asset-types", label: "Asset Types", icon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>` },
     { id: "alerts", label: "Alerts", icon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`, badge: alertCount || null },
+    { id: "documentation", label: "Docs & FAQ", icon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>` },
   ];
 
   const opsItems = [];
@@ -1410,6 +1411,7 @@ function renderView() {
     case "system-health": return viewSystemHealth();
     case "sessions": return viewSessions();
     case "api-usage": return viewAPIUsage();
+    case "documentation": return viewDocumentation();
     default: return viewDashboard();
   }
 }
@@ -5684,4 +5686,476 @@ async function boot() {
   try { await loadInitial(); connectWs(); } catch {}
 }
 
-boot();
+// ---------- Documentation & Help ----------
+
+let docTab = "getting-started";
+let faqSearch = "";
+
+function viewDocumentation() {
+  return `
+    <div class="top-bar">
+      <div>
+        <h2>Documentation</h2>
+        <div class="subtitle">Guides, FAQs, and reference for the Cretek Industrial IoT Platform</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px;">
+      ${["getting-started","how-to","faq","api","troubleshooting"].map(t => `
+        <button class="btn ${docTab === t ? 'btn-primary' : ''}" onclick="docTab='${t}';render()">${t.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}</button>
+      `).join("")}
+    </div>
+    <div id="doc-content">${renderDocContent()}</div>
+  `;
+}
+
+function renderDocContent() {
+  switch (docTab) {
+    case "getting-started": return renderDocGettingStarted();
+    case "how-to": return renderDocHowTo();
+    case "faq": return renderDocFAQ();
+    case "api": return renderDocAPI();
+    case "troubleshooting": return renderDocTroubleshooting();
+    default: return renderDocGettingStarted();
+  }
+}
+
+function renderDocGettingStarted() {
+  return `
+    <div style="display:grid;gap:16px;">
+      <div class="form-card">
+        <h3 style="font-size:16px;margin-bottom:8px;color:var(--text-primary);">Welcome to Cretek Industrial IoT Platform</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;margin-bottom:16px;">
+          The Cretek Industrial IoT Platform is a comprehensive solution for monitoring, managing, and analyzing industrial equipment and operations. It supports real-time telemetry, predictive maintenance, production tracking, quality management, and advanced analytics.
+        </p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;">
+          <div style="padding:14px;background:var(--bg-tertiary);border-radius:6px;border:1px solid var(--border-color);">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">1. Set Up Your Hierarchy</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">Create Sites, Areas, Lines, and Stations to organize your plant structure. Navigate to <strong>Hierarchy</strong> in the sidebar.</div>
+          </div>
+          <div style="padding:14px;background:var(--bg-tertiary);border-radius:6px;border:1px solid var(--border-color);">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">2. Define Asset Types</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">Create asset types (Motor, Pump, Valve, etc.) and define their telemetry signals. Go to <strong>Asset Types</strong>.</div>
+          </div>
+          <div style="padding:14px;background:var(--bg-tertiary);border-radius:6px;border:1px solid var(--border-color);">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">3. Register Devices</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">Add devices and assign them to asset types. Configure IP addresses and protocols. Go to <strong>Devices</strong>.</div>
+          </div>
+          <div style="padding:14px;background:var(--bg-tertiary);border-radius:6px;border:1px solid var(--border-color);">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">4. Connect the Gateway</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">Install the gateway service on your local network. It polls devices and sends telemetry to the platform. See <strong>Gateway Keys</strong> for API keys.</div>
+          </div>
+          <div style="padding:14px;background:var(--bg-tertiary);border-radius:6px;border:1px solid var(--border-color);">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">5. Build Your Dashboard</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">Create dashboard views with widgets for real-time monitoring. Drag and resize widgets. Go to <strong>Dashboard</strong>.</div>
+          </div>
+          <div style="padding:14px;background:var(--bg-tertiary);border-radius:6px;border:1px solid var(--border-color);">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">6. Configure Alerts</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">Set up alert rules for thresholds, anomalies, and conditions. Configure notifications. Go to <strong>Alert Rules</strong>.</div>
+          </div>
+        </div>
+      </div>
+      <div class="form-card">
+        <h3 style="font-size:16px;margin-bottom:8px;color:var(--text-primary);">User Roles</h3>
+        <div style="display:grid;gap:8px;">
+          <div style="display:flex;gap:12px;align-items:start;padding:10px;background:var(--bg-tertiary);border-radius:4px;">
+            <span style="font-size:11px;font-weight:600;color:var(--accent);min-width:60px;text-transform:uppercase;">Admin</span>
+            <span style="font-size:12px;color:var(--text-secondary);">Full system access. Manages users, SSO, organizations, and all configuration. Can view all data across all tenants.</span>
+          </div>
+          <div style="display:flex;gap:12px;align-items:start;padding:10px;background:var(--bg-tertiary);border-radius:4px;">
+            <span style="font-size:11px;font-weight:600;color:var(--accent);min-width:60px;text-transform:uppercase;">Manager</span>
+            <span style="font-size:12px;color:var(--text-secondary);">Operational access. Manages devices, alert rules, production, maintenance, analytics, integrations, and engineering. Can create shared views.</span>
+          </div>
+          <div style="display:flex;gap:12px;align-items:start;padding:10px;background:var(--bg-tertiary);border-radius:4px;">
+            <span style="font-size:11px;font-weight:600;color:var(--accent);min-width:60px;text-transform:uppercase;">Operator</span>
+            <span style="font-size:12px;color:var(--text-secondary);">Read-only access to dashboards, devices, alerts, and production data. Can acknowledge alerts and log downtime events.</span>
+          </div>
+          <div style="display:flex;gap:12px;align-items:start;padding:10px;background:var(--bg-tertiary);border-radius:4px;">
+            <span style="font-size:11px;font-weight:600;color:var(--accent);min-width:60px;text-transform:uppercase;">Viewer</span>
+            <span style="font-size:12px;color:var(--text-secondary);">Read-only access to dashboards and device status. Cannot modify any configuration or acknowledge alerts.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDocHowTo() {
+  const guides = [
+    { title: "Create a Site", category: "Hierarchy", steps: [
+      "Navigate to <strong>Hierarchy</strong> in the sidebar.",
+      "Click <strong>+ New Site</strong> in the top-right.",
+      "Enter a name for the site (e.g., 'Plant A', 'Factory North').",
+      "Click <strong>Create</strong>.",
+      "Sites are the top level of your plant hierarchy. Add Areas, Lines, and Stations below each site."
+    ]},
+    { title: "Add an Asset Type", category: "Asset Types", steps: [
+      "Navigate to <strong>Asset Types</strong>.",
+      "Click <strong>+ Create Asset Type</strong>.",
+      "Fill in the name (required), description, category, and icon.",
+      "Select a category: Equipment, Sensor, Controller, Communication, Safety, Utility, or Other.",
+      "Click <strong>Create Asset Type</strong>.",
+      "After creation, you can define telemetry signals for this asset type via the API."
+    ]},
+    { title: "Register a Device", category: "Devices", steps: [
+      "Navigate to <strong>Devices</strong>.",
+      "Click <strong>+ Add Device</strong>.",
+      "Enter the Device ID (unique identifier), name, and IP address.",
+      "Select the asset type and assign it to a station in the hierarchy.",
+      "Configure the protocol (Modbus TCP, MQTT, OPC-UA, etc.) and connection parameters.",
+      "Click <strong>Save</strong>."
+    ]},
+    { title: "Configure the Gateway", category: "Gateway", steps: [
+      "Navigate to <strong>Gateway Keys</strong> (Manager/Admin only).",
+      "Click <strong>+ New Key</strong> and give it a label.",
+      "Copy the generated API key.",
+      "Install the gateway service on a machine in your plant network.",
+      "Configure the gateway with the API key and backend URL.",
+      "The gateway will poll devices at their configured intervals and post readings to the platform."
+    ]},
+    { title: "Create a Dashboard Widget", category: "Dashboard", steps: [
+      "Navigate to <strong>Dashboard</strong>.",
+      "Click <strong>+ Add Widget</strong>.",
+      "Select the widget type: Metric Chart, Device Status, KPI Card, or Status Overview.",
+      "Choose the device and metric to display.",
+      "Configure the time range and display options.",
+      "Click <strong>Add</strong>.",
+      "Drag widgets to reposition. Drag the bottom-right corner to resize."
+    ]},
+    { title: "Set Up Alert Rules", category: "Alerts", steps: [
+      "Navigate to <strong>Alert Rules</strong> (Manager only).",
+      "Click <strong>+ Create Rule</strong>.",
+      "Enter a name and select the metric to monitor.",
+      "Set the condition: >, >=, <, <=, ==, != and threshold value.",
+      "Choose severity: Info, Warning, or Critical.",
+      "Click <strong>Create</strong>.",
+      "Alerts will trigger when device readings meet the condition."
+    ]},
+    { title: "Record Production Data", category: "Production", steps: [
+      "Navigate to <strong>Production Orders</strong>.",
+      "Click <strong>+ New Order</strong> and enter order details.",
+      "Start the order when production begins.",
+      "Log bag counts, downtime events, and quality checks during production.",
+      "Complete the order when finished.",
+      "View production metrics in the <strong>OEE</strong> and <strong>SPC</strong> views."
+    ]},
+    { title: "Schedule Maintenance", category: "Maintenance", steps: [
+      "Navigate to <strong>Maintenance</strong>.",
+      "Click <strong>+ Add Record</strong> to log maintenance activity.",
+      "Enter the type (preventive, corrective, predictive), description, and parts used.",
+      "Set the next scheduled date for preventive maintenance.",
+      "Track labor hours and costs.",
+      "View maintenance history and upcoming schedules."
+    ]},
+    { title: "Use Predictive Maintenance", category: "Predictive", steps: [
+      "Navigate to <strong>Predictive</strong>.",
+      "View device health scores (0-100%) based on 7 factors.",
+      "Check Remaining Useful Life (RUL) estimates.",
+      "Review failure predictions and risk scores.",
+      "Follow maintenance recommendations.",
+      "Analyze cost optimization suggestions."
+    ]},
+    { title: "Run ML Analysis", category: "Analytics", steps: [
+      "Navigate to <strong>ML Models</strong> to train models on your data.",
+      "Select the model type: Regression, Classification, Anomaly Detection, or Forecasting.",
+      "Choose training data and parameters.",
+      "After training, go to <strong>ML Analysis</strong> to run predictions.",
+      "View anomaly scores, drift detection, and forecast results."
+    ]},
+  ];
+
+  return `
+    <div style="display:grid;gap:16px;">
+      ${guides.map(g => `
+        <div class="form-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <h3 style="font-size:14px;color:var(--text-primary);">${esc(g.title)}</h3>
+            <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;background:var(--bg-tertiary);padding:3px 8px;border-radius:3px;">${esc(g.category)}</span>
+          </div>
+          <ol style="margin:0;padding-left:18px;font-size:12px;color:var(--text-secondary);line-height:1.8;">
+            ${g.steps.map(s => `<li>${s}</li>`).join("")}
+          </ol>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderDocFAQ() {
+  const faqs = [
+    { q: "What is the Cretek Industrial IoT Platform?", a: "A comprehensive platform for monitoring, managing, and analyzing industrial equipment. It supports real-time telemetry, predictive maintenance, production tracking, quality management, SPC, OEE, and advanced analytics." },
+    { q: "What protocols are supported?", a: "Modbus TCP, Modbus RTU, MQTT, OPC-UA, HTTP/REST, SNMP, BACnet, Ethernet/IP, PROFINET, EtherCAT, CAN bus, HART, Foundation Fieldbus, DNP3, IEC 61850, and proprietary serial protocols." },
+    { q: "How do I connect devices?", a: "Register devices in the Devices view with their IP address and protocol. Install the gateway service on your local network. The gateway polls devices and sends telemetry to the platform via the API." },
+    { q: "What is the gateway?", a: "A lightweight Node.js service that runs on your local network. It polls devices at configured intervals, collects telemetry data, and posts it to the platform. It handles reconnection, buffering, and queue management." },
+    { q: "How does the dashboard work?", a: "Create dashboard views and add widgets (Metric Chart, Device Status, KPI Card, Status Overview). Drag to reposition and resize. Views can be personal or shared across the team." },
+    { q: "How do alerts work?", a: "Create alert rules with conditions (e.g., temperature > 80). When device readings meet the condition, an alert triggers. Alerts can be acknowledged, resolved, and routed to notifications (email, Slack, Teams, WhatsApp)." },
+    { q: "What is predictive maintenance?", a: "The platform analyzes device health using 7 factors: vibration, temperature, runtime, error rate, load, maintenance history, and age. It estimates Remaining Useful Life (RUL) and recommends maintenance actions." },
+    { q: "What is OEE?", a: "Overall Equipment Effectiveness = Availability x Performance x Quality. It measures how well equipment operates compared to its full potential. The platform calculates OEE automatically from production data." },
+    { q: "What is SPC?", a: "Statistical Process Control monitors production quality using control charts. The platform tracks X-bar, R, and P charts with automatic calculation of control limits and process capability (Cp, Cpk)." },
+    { q: "Can I integrate with other systems?", a: "Yes. The platform supports webhooks, REST API integration, data import/export (CSV/JSON), and has an integration hub for connecting to ERP, MES, SCADA, and other enterprise systems." },
+    { q: "Is the platform secure?", a: "Yes. Features include JWT authentication, 2FA (TOTP), role-based access control, session management, IP-based rate limiting, CORS protection, helmet security headers, and audit logging." },
+    { q: "How do I reset my password?", a: "Click 'Change Password' in the dashboard header. Enter your current and new password. Admins can reset passwords for other users in the Users view." },
+    { q: "What browsers are supported?", a: "Chrome, Firefox, Safari, and Edge (latest versions). The platform is a Progressive Web App (PWA) and works offline for cached static assets." },
+    { q: "How do I enable 2FA?", a: "Go to Dashboard > Change Password > Set up 2FA. Scan the QR code with Google Authenticator or Authy. Enter the 6-digit code to verify. 2FA is required for admin accounts." },
+    { q: "Can I create custom reports?", a: "Yes. Use the Report Builder (Manager) to create report templates with selected data sources, time ranges, and chart types. Schedule reports for automatic generation and delivery." },
+  ];
+
+  const filtered = faqs.filter(f =>
+    !faqSearch || f.q.toLowerCase().includes(faqSearch.toLowerCase()) || f.a.toLowerCase().includes(faqSearch.toLowerCase())
+  );
+
+  return `
+    <div class="form-card" style="margin-bottom:16px;">
+      <input class="form-input" type="text" placeholder="Search FAQs..." value="${esc(faqSearch)}" oninput="faqSearch=this.value;document.getElementById('faq-list').innerHTML=renderDocFAQList();" style="width:100%;" />
+    </div>
+    <div id="faq-list">${renderDocFAQListInternal(filtered)}</div>
+  `;
+}
+
+function renderDocFAQList() {
+  const faqs = [
+    { q: "What is the Cretek Industrial IoT Platform?", a: "A comprehensive platform for monitoring, managing, and analyzing industrial equipment. It supports real-time telemetry, predictive maintenance, production tracking, quality management, SPC, OEE, and advanced analytics." },
+    { q: "What protocols are supported?", a: "Modbus TCP, Modbus RTU, MQTT, OPC-UA, HTTP/REST, SNMP, BACnet, Ethernet/IP, PROFINET, EtherCAT, CAN bus, HART, Foundation Fieldbus, DNP3, IEC 61850, and proprietary serial protocols." },
+    { q: "How do I connect devices?", a: "Register devices in the Devices view with their IP address and protocol. Install the gateway service on your local network. The gateway polls devices and sends telemetry to the platform via the API." },
+    { q: "What is the gateway?", a: "A lightweight Node.js service that runs on your local network. It polls devices at configured intervals, collects telemetry data, and posts it to the platform. It handles reconnection, buffering, and queue management." },
+    { q: "How does the dashboard work?", a: "Create dashboard views and add widgets (Metric Chart, Device Status, KPI Card, Status Overview). Drag to reposition and resize. Views can be personal or shared across the team." },
+    { q: "How do alerts work?", a: "Create alert rules with conditions (e.g., temperature > 80). When device readings meet the condition, an alert triggers. Alerts can be acknowledged, resolved, and routed to notifications (email, Slack, Teams, WhatsApp)." },
+    { q: "What is predictive maintenance?", a: "The platform analyzes device health using 7 factors: vibration, temperature, runtime, error rate, load, maintenance history, and age. It estimates Remaining Useful Life (RUL) and recommends maintenance actions." },
+    { q: "What is OEE?", a: "Overall Equipment Effectiveness = Availability x Performance x Quality. It measures how well equipment operates compared to its full potential. The platform calculates OEE automatically from production data." },
+    { q: "What is SPC?", a: "Statistical Process Control monitors production quality using control charts. The platform tracks X-bar, R, and P charts with automatic calculation of control limits and process capability (Cp, Cpk)." },
+    { q: "Can I integrate with other systems?", a: "Yes. The platform supports webhooks, REST API integration, data import/export (CSV/JSON), and has an integration hub for connecting to ERP, MES, SCADA, and other enterprise systems." },
+    { q: "Is the platform secure?", a: "Yes. Features include JWT authentication, 2FA (TOTP), role-based access control, session management, IP-based rate limiting, CORS protection, helmet security headers, and audit logging." },
+    { q: "How do I reset my password?", a: "Click 'Change Password' in the dashboard header. Enter your current and new password. Admins can reset passwords for other users in the Users view." },
+    { q: "What browsers are supported?", a: "Chrome, Firefox, Safari, and Edge (latest versions). The platform is a Progressive Web App (PWA) and works offline for cached static assets." },
+    { q: "How do I enable 2FA?", a: "Go to Dashboard > Change Password > Set up 2FA. Scan the QR code with Google Authenticator or Authy. Enter the 6-digit code to verify. 2FA is required for admin accounts." },
+    { q: "Can I create custom reports?", a: "Yes. Use the Report Builder (Manager) to create report templates with selected data sources, time ranges, and chart types. Schedule reports for automatic generation and delivery." },
+  ];
+  const filtered = faqs.filter(f =>
+    !faqSearch || f.q.toLowerCase().includes(faqSearch.toLowerCase()) || f.a.toLowerCase().includes(faqSearch.toLowerCase())
+  );
+  return renderDocFAQListInternal(filtered);
+}
+
+function renderDocFAQListInternal(faqs) {
+  if (faqs.length === 0) return `<div class="form-card" style="text-align:center;padding:24px;color:var(--text-muted);">No matching FAQs found.</div>`;
+  return `<div style="display:grid;gap:8px;">
+    ${faqs.map(f => `
+      <div class="form-card" style="cursor:pointer;" onclick="this.querySelector('.faq-answer').style.display=this.querySelector('.faq-answer').style.display==='none'?'block':'none'">
+        <div style="font-size:13px;font-weight:500;color:var(--text-primary);display:flex;justify-content:space-between;align-items:center;">
+          ${esc(f.q)}
+          <span style="color:var(--text-muted);font-size:16px;">+</span>
+        </div>
+        <div class="faq-answer" style="display:none;margin-top:10px;font-size:12px;color:var(--text-secondary);line-height:1.7;border-top:1px solid var(--border-color);padding-top:10px;">
+          ${esc(f.a)}
+        </div>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
+function renderDocAPI() {
+  return `
+    <div style="display:grid;gap:16px;">
+      <div class="form-card">
+        <h3 style="font-size:16px;margin-bottom:8px;color:var(--text-primary);">API Reference</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;margin-bottom:16px;">
+          The Cretek Industrial IoT Platform exposes a RESTful API for all operations. All endpoints require JWT authentication via the <code style="background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;font-family:var(--font-mono);font-size:11px;">Authorization: Bearer &lt;token&gt;</code> header.
+        </p>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+          Base URL: <code style="background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;font-family:var(--font-mono);">${esc(API)}</code>
+        </div>
+      </div>
+      ${[
+        { group: "Authentication", endpoints: [
+          { method: "POST", path: "/api/auth/login", desc: "Login with username/password. Returns JWT token." },
+          { method: "POST", path: "/api/auth/2fa/setup", desc: "Initialize 2FA setup. Returns QR code." },
+          { method: "POST", path: "/api/auth/2fa/verify", desc: "Verify 2FA code and enable TOTP." },
+          { method: "POST", path: "/api/auth/2fa/disable", desc: "Disable 2FA (requires password)." },
+          { method: "POST", path: "/api/auth/revoke-sessions", desc: "Revoke all sessions for current user." },
+        ]},
+        { group: "Hierarchy", endpoints: [
+          { method: "GET", path: "/api/hierarchy", desc: "Get full site/area/line/station hierarchy." },
+          { method: "POST", path: "/api/sites", desc: "Create a new site." },
+          { method: "PUT", path: "/api/sites/:id", desc: "Update a site." },
+          { method: "DELETE", path: "/api/sites/:id", desc: "Delete a site and all children." },
+          { method: "POST", path: "/api/areas", desc: "Create an area under a site." },
+          { method: "PUT", path: "/api/areas/:id", desc: "Update an area." },
+          { method: "DELETE", path: "/api/areas/:id", desc: "Delete an area." },
+          { method: "POST", path: "/api/lines", desc: "Create a line under an area." },
+          { method: "PUT", path: "/api/lines/:id", desc: "Update a line." },
+          { method: "DELETE", path: "/api/lines/:id", desc: "Delete a line." },
+          { method: "DELETE", path: "/api/stations/:id", desc: "Delete a station." },
+        ]},
+        { group: "Devices", endpoints: [
+          { method: "GET", path: "/api/devices", desc: "List all devices." },
+          { method: "POST", path: "/api/devices", desc: "Register a new device." },
+          { method: "PUT", path: "/api/devices/:id", desc: "Update device configuration." },
+          { method: "DELETE", path: "/api/devices/:id", desc: "Delete a device." },
+          { method: "POST", path: "/api/readings", desc: "Post a reading (gateway)." },
+          { method: "GET", path: "/api/readings/latest", desc: "Get latest readings for all devices." },
+          { method: "GET", path: "/api/readings/history/:deviceId", desc: "Get reading history for a device." },
+          { method: "GET", path: "/api/telemetry/latest", desc: "Get latest telemetry for all devices." },
+        ]},
+        { group: "Asset Types", endpoints: [
+          { method: "GET", path: "/api/asset-types", desc: "List all asset types." },
+          { method: "POST", path: "/api/asset-types", desc: "Create a new asset type." },
+          { method: "PUT", path: "/api/asset-types/:id", desc: "Update an asset type." },
+          { method: "DELETE", path: "/api/asset-types/:id", desc: "Delete an asset type." },
+        ]},
+        { group: "Alerts & Rules", endpoints: [
+          { method: "GET", path: "/api/alerts", desc: "List active and historical alerts." },
+          { method: "POST", path: "/api/alerts/:id/acknowledge", desc: "Acknowledge an alert." },
+          { method: "GET", path: "/api/alert-rules", desc: "List alert rules." },
+          { method: "POST", path: "/api/alert-rules", desc: "Create an alert rule." },
+          { method: "DELETE", path: "/api/alert-rules/:id", desc: "Delete an alert rule." },
+          { method: "POST", path: "/api/alert-rules/:id/test", desc: "Test an alert rule against current data." },
+        ]},
+        { group: "Dashboard", endpoints: [
+          { method: "GET", path: "/api/dashboard-views", desc: "List dashboard views." },
+          { method: "POST", path: "/api/dashboard-views", desc: "Create a dashboard view." },
+          { method: "PUT", path: "/api/dashboard-views/:id", desc: "Update a dashboard view." },
+          { method: "DELETE", path: "/api/dashboard-views/:id", desc: "Delete a dashboard view." },
+          { method: "POST", path: "/api/dashboard-views/:id/duplicate", desc: "Duplicate a dashboard view." },
+          { method: "POST", path: "/api/dashboard-views/reorder", desc: "Reorder dashboard views." },
+          { method: "GET", path: "/api/dashboard-widgets", desc: "List widgets for a view." },
+          { method: "POST", path: "/api/dashboard-widgets", desc: "Add a widget to a view." },
+          { method: "PUT", path: "/api/dashboard-widgets/:id", desc: "Update a widget." },
+          { method: "DELETE", path: "/api/dashboard-widgets/:id", desc: "Delete a widget." },
+          { method: "PUT", path: "/api/dashboard-widgets/batch", desc: "Batch update widget positions/sizes." },
+        ]},
+        { group: "Production", endpoints: [
+          { method: "GET", path: "/api/production-orders", desc: "List production orders." },
+          { method: "POST", path: "/api/production-orders", desc: "Create a production order." },
+          { method: "POST", path: "/api/production-orders/:id/start", desc: "Start a production order." },
+          { method: "POST", path: "/api/production-orders/:id/complete", desc: "Complete a production order." },
+          { method: "POST", path: "/api/production-orders/:id/log-bags", desc: "Log bag count for an order." },
+          { method: "GET", path: "/api/quality-metrics", desc: "List quality metrics." },
+          { method: "POST", path: "/api/quality-metrics", desc: "Log a quality metric." },
+        ]},
+        { group: "Maintenance", endpoints: [
+          { method: "GET", path: "/api/maintenance", desc: "List maintenance records." },
+          { method: "POST", path: "/api/maintenance", desc: "Create a maintenance record." },
+          { method: "PUT", path: "/api/maintenance/:id", desc: "Update a maintenance record." },
+          { method: "DELETE", path: "/api/maintenance/:id", desc: "Delete a maintenance record." },
+          { method: "GET", path: "/api/maintenance-schedules", desc: "List maintenance schedules." },
+          { method: "POST", path: "/api/maintenance-schedules", desc: "Create a maintenance schedule." },
+        ]},
+        { group: "Analytics & ML", endpoints: [
+          { method: "GET", path: "/api/ml-models", desc: "List ML models." },
+          { method: "POST", path: "/api/ml-models", desc: "Train a new ML model." },
+          { method: "GET", path: "/api/ml-predictions", desc: "List ML predictions." },
+          { method: "POST", path: "/api/ml-predictions/run", desc: "Run predictions on a model." },
+          { method: "GET", path: "/api/anomalies", desc: "List detected anomalies." },
+          { method: "GET", path: "/api/forecasts", desc: "List forecasts." },
+          { method: "GET", path: "/api/predictive/health", desc: "Get device health scores." },
+          { method: "GET", path: "/api/predictive/rul", desc: "Get remaining useful life estimates." },
+        ]},
+        { group: "Integrations", endpoints: [
+          { method: "GET", path: "/api/integrations", desc: "List integrations." },
+          { method: "POST", path: "/api/integrations", desc: "Create an integration." },
+          { method: "DELETE", path: "/api/integrations/:id", desc: "Delete an integration." },
+          { method: "GET", path: "/api/webhooks", desc: "List webhooks." },
+          { method: "POST", path: "/api/webhooks", desc: "Create a webhook." },
+          { method: "DELETE", path: "/api/webhooks/:id", desc: "Delete a webhook." },
+          { method: "POST", path: "/api/export", desc: "Export data as CSV/JSON." },
+          { method: "POST", path: "/api/import", desc: "Import data from CSV/JSON." },
+        ]},
+        { group: "System", endpoints: [
+          { method: "GET", path: "/api/health", desc: "Full system health check." },
+          { method: "GET", path: "/api/health/ping", desc: "Simple ping endpoint." },
+          { method: "GET", path: "/api/audit", desc: "List audit log entries." },
+          { method: "GET", path: "/api/users", desc: "List users (Admin)." },
+          { method: "POST", path: "/api/users", desc: "Create a user (Admin)." },
+          { method: "GET", path: "/api/organizations", desc: "List organizations (Admin)." },
+        ]},
+      ].map(g => `
+        <div class="form-card">
+          <h3 style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.05em;">${esc(g.group)}</h3>
+          <div style="display:grid;gap:4px;">
+            ${g.endpoints.map(e => `
+              <div style="display:flex;gap:10px;align-items:center;padding:6px 8px;background:var(--bg-tertiary);border-radius:3px;font-size:12px;">
+                <span style="font-family:var(--font-mono);font-size:10px;font-weight:600;min-width:50px;padding:2px 6px;border-radius:3px;text-align:center;${e.method === 'GET' ? 'background:#1a3a2a;color:#3fb950;' : e.method === 'POST' ? 'background:#1a2a3a;color:#58a6ff;' : e.method === 'PUT' ? 'background:#3a2a1a;color:#d29922;' : 'background:#3a1a1a;color:#f85149;'}">${e.method}</span>
+                <code style="font-family:var(--font-mono);color:var(--text-primary);min-width:200px;">${esc(e.path)}</code>
+                <span style="color:var(--text-secondary);">${esc(e.desc)}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderDocTroubleshooting() {
+  const issues = [
+    { title: "Cannot log in", solutions: [
+      "Verify your username and password are correct.",
+      "Check if 2FA is enabled — you need your authenticator code.",
+      "If locked out, contact an admin to reset your password or revoke sessions.",
+      "Clear browser cache and cookies, then try again."
+    ]},
+    { title: "Devices show offline", solutions: [
+      "Verify the device IP address is correct and reachable from the gateway.",
+      "Check the gateway service is running: visit /api/health/ping.",
+      "Ensure the device is powered on and connected to the network.",
+      "Check firewall rules — the gateway needs access to device ports.",
+      "Review the gateway logs for connection errors."
+    ]},
+    { title: "No telemetry data appearing", solutions: [
+      "Verify the gateway API key is valid (Gateway Keys page).",
+      "Check the gateway is posting to /api/readings and /api/telemetry.",
+      "Ensure device intervals are configured (default: 5 seconds).",
+      "Check the device has an asset type assigned with defined metrics.",
+      "Review the gateway queue for failed posts (pending-readings.jsonl)."
+    ]},
+    { title: "Dashboard widgets not loading", solutions: [
+      "Refresh the page (hard refresh: Ctrl+Shift+R).",
+      "Check if the device associated with the widget is online.",
+      "Verify the widget configuration (device ID, metric name).",
+      "Clear browser local storage and re-login."
+    ]},
+    { title: "Alerts not triggering", solutions: [
+      "Verify the alert rule is active and the condition is correct.",
+      "Check the device is sending data that meets the threshold.",
+      "Review the alert rule test feature to validate the condition.",
+      "Ensure the metric name matches exactly (case-sensitive)."
+    ]},
+    { title: "Gateway connection errors", solutions: [
+      "ECONNREFUSED: Device is not accepting connections. Check device power and network.",
+      "ETIMEDOUT: Network timeout. Check firewall, routing, and device IP.",
+      "ENOTFOUND: DNS resolution failed. Use IP addresses, not hostnames.",
+      "Socket hang up: Device closed connection unexpectedly. Check device configuration."
+    ]},
+    { title: "Performance issues", solutions: [
+      "Reduce telemetry polling intervals for non-critical devices.",
+      "Limit dashboard widget time ranges (use 1h instead of 24h).",
+      "Archive old data using the data export feature.",
+      "Check system health (System page) for memory and database usage.",
+      "Consider scaling the Render instance if on the free tier."
+    ]},
+    { title: "2FA issues", solutions: [
+      "Ensure your device clock is synchronized (use NTP).",
+      "Scan the QR code again if the code is not accepted.",
+      "Use the manual entry key if QR scanning fails.",
+      "Contact an admin to disable 2FA if you lose access to your authenticator."
+    ]},
+  ];
+
+  return `
+    <div style="display:grid;gap:16px;">
+      <div class="form-card">
+        <h3 style="font-size:16px;margin-bottom:8px;color:var(--text-primary);">Troubleshooting Guide</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
+          Common issues and their solutions. If your issue is not listed here, check the system health page or contact support.
+        </p>
+      </div>
+      ${issues.map(i => `
+        <div class="form-card">
+          <h3 style="font-size:14px;color:var(--text-primary);margin-bottom:10px;">${esc(i.title)}</h3>
+          <ul style="margin:0;padding-left:18px;font-size:12px;color:var(--text-secondary);line-height:1.8;">
+            ${i.solutions.map(s => `<li>${esc(s)}</li>`).join("")}
+          </ul>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
