@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: cd backend && npm install
-    startCommand: node backend/server.js
+    startCommand: cd backend && node server.js
     envVars:
       - key: DATABASE_URL
         sync: false
@@ -14,4 +14,4 @@ services:
         sync: false
       - key: NODE_ENV
         value: production
-    healthCheckPath: /api/alert-config
+    healthCheckPath: /api/health/ping
