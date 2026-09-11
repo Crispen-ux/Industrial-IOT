@@ -157,16 +157,18 @@ function closeModal() {
 function showConfirm(options) {
   return new Promise((resolve) => {
     const { title = "Confirm", message, confirmText = "Confirm", cancelText = "Cancel", danger = false } = typeof options === "string" ? { message: options } : options;
+    let resolved = false;
+    const doResolve = (val) => { if (!resolved) { resolved = true; resolve(val); } };
     openModal({
       title,
       size: "sm",
       body: `<p style="color:#8B949E;font-size:14px;line-height:1.5;">${esc(message)}</p>`,
       footer: `
-        <button class="btn btn-secondary" onclick="closeModal(); window._confirmResolve(false);">${esc(cancelText)}</button>
-        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" onclick="closeModal(); window._confirmResolve(true);">${esc(confirmText)}</button>`,
-      onClose: () => { window._confirmResolve = null; resolve(false); }
+        <button class="btn btn-secondary" onclick="window._confirmResolve(false); closeModal();">${esc(cancelText)}</button>
+        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" onclick="window._confirmResolve(true); closeModal();">${esc(confirmText)}</button>`,
+      onClose: () => { window._confirmResolve = null; doResolve(false); }
     });
-    window._confirmResolve = resolve;
+    window._confirmResolve = doResolve;
   });
 }
 
@@ -175,6 +177,8 @@ function showPrompt(options) {
   return new Promise((resolve) => {
     const { title = "Input", label, placeholder = "", defaultValue = "", type = "text" } = typeof options === "string" ? { label: options } : options;
     const inputId = "prompt-input-" + Date.now();
+    let resolved = false;
+    const doResolve = (val) => { if (!resolved) { resolved = true; resolve(val); } };
     openModal({
       title,
       size: "sm",
@@ -184,11 +188,11 @@ function showPrompt(options) {
           <input class="form-input" id="${inputId}" type="${type}" value="${esc(defaultValue)}" placeholder="${esc(placeholder)}" />
         </div>`,
       footer: `
-        <button class="btn btn-secondary" onclick="closeModal(); window._promptResolve(null);">Cancel</button>
+        <button class="btn btn-secondary" onclick="window._promptResolve(null); closeModal();">Cancel</button>
         <button class="btn btn-primary" onclick="window._promptResolve(document.getElementById('${inputId}').value); closeModal();">OK</button>`,
-      onClose: () => { window._promptResolve = null; resolve(null); }
+      onClose: () => { window._promptResolve = null; doResolve(null); }
     });
-    window._promptResolve = resolve;
+    window._promptResolve = doResolve;
     // Enter to submit
     setTimeout(() => {
       const input = document.getElementById(inputId);
@@ -205,6 +209,8 @@ function showPrompt(options) {
 function showFormModal(options) {
   return new Promise((resolve) => {
     const { title, subtitle, fields, submitText = "Create", cancelText = "Cancel", danger = false } = options;
+    let resolved = false;
+    const doResolve = (val) => { if (!resolved) { resolved = true; resolve(val); } };
     const fieldsHtml = fields.map(f => {
       const id = "form-field-" + f.name;
       if (f.type === "select") {
@@ -230,11 +236,11 @@ function showFormModal(options) {
       subtitle,
       body: `<form id="modal-form" onsubmit="event.preventDefault(); window._formSubmitHandler();">${fieldsHtml}</form>`,
       footer: `
-        <button class="btn btn-secondary" onclick="closeModal(); window._formResolve(null);">${esc(cancelText)}</button>
+        <button class="btn btn-secondary" onclick="window._formResolve(null); closeModal();">${esc(cancelText)}</button>
         <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" onclick="window._formSubmitHandler();">${esc(submitText)}</button>`,
-      onClose: () => { window._formResolve = null; resolve(null); }
+      onClose: () => { window._formResolve = null; window._formSubmitHandler = null; doResolve(null); }
     });
-    window._formResolve = resolve;
+    window._formResolve = doResolve;
     
     window._formSubmitHandler = () => {
       const values = {};
@@ -251,7 +257,7 @@ function showFormModal(options) {
         }
       }
       closeModal();
-      resolve(values);
+      doResolve(values);
     };
   });
 }
