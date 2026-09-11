@@ -188,6 +188,7 @@ function showPrompt(options) {
         <button class="btn btn-primary" onclick="window._promptResolve(document.getElementById('${inputId}').value); closeModal();">OK</button>`,
       onClose: () => { window._promptResolve = null; resolve(null); }
     });
+    window._promptResolve = resolve;
     // Enter to submit
     setTimeout(() => {
       const input = document.getElementById(inputId);
@@ -233,6 +234,7 @@ function showFormModal(options) {
         <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" onclick="window._formSubmitHandler();">${esc(submitText)}</button>`,
       onClose: () => { window._formResolve = null; resolve(null); }
     });
+    window._formResolve = resolve;
     
     window._formSubmitHandler = () => {
       const values = {};
