@@ -2697,6 +2697,7 @@ let oeeData = null;
 
 function viewOEE() {
   if (!oeeDeviceId && devices.length) oeeDeviceId = devices[0].id;
+  if (!oeeData && devices.length) loadOEE();
 
   return `
     <div class="top-bar">
@@ -2709,7 +2710,7 @@ function viewOEE() {
       </div>
     </div>
     <div id="oee-content">
-      ${oeeData ? renderOEEData() : `<div style="padding:20px;color:var(--muted);text-align:center;">Click Refresh to load OEE data.</div>`}
+      ${oeeData ? renderOEEData() : `<div style="padding:40px;text-align:center;color:var(--text-muted);">Loading OEE data...</div>`}
     </div>`;
 }
 
@@ -2861,6 +2862,8 @@ function renderSPCCharts(readings, target, product) {
 function viewSPC() {
   const device = devices.find(d => d.id === spcDeviceId) || devices[0];
   const product = products.find(p => p.id === device?.productId);
+
+  if (!spcReadings.length && devices.length) loadSPCData();
 
   // Collect all available metrics for this device
   const availableMetrics = [
@@ -4953,37 +4956,52 @@ async function revokeAllSessions() {
 
 // --- System Health View ---
 
-async function viewSystemHealth() {
-  const res = await authFetch(`${API}/api/health`);
-  const health = await res.json();
+function viewSystemHealth() {
+  // Load data async, show loading first
+  loadSystemHealthData();
   return `
     <div class="top-bar">
       <div><h2>System Health</h2><div class="subtitle">Platform status and diagnostics</div></div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-      <div class="form-card">
-        <div class="section-label mono" style="margin-bottom:12px;">Database</div>
-        <div class="kv-row"><span class="kv-label">Status</span><span class="kv-value" style="color:${health.database === "connected" ? "#27ae60" : "#E5484D"};">${health.database}</span></div>
-        <div class="kv-row"><span class="kv-label">Pool Total</span><span class="kv-value">${health.poolTotal || "N/A"}</span></div>
-        <div class="kv-row"><span class="kv-label">Pool Idle</span><span class="kv-value">${health.poolIdle || "N/A"}</span></div>
-      </div>
-      <div class="form-card">
-        <div class="section-label mono" style="margin-bottom:12px;">System</div>
-        <div class="kv-row"><span class="kv-label">Uptime</span><span class="kv-value">${health.uptime ? Math.floor(health.uptime / 3600) + "h " + Math.floor((health.uptime % 3600) / 60) + "m" : "N/A"}</span></div>
-        <div class="kv-row"><span class="kv-label">Memory Used</span><span class="kv-value">${health.memoryUsed || "N/A"}</span></div>
-        <div class="kv-row"><span class="kv-label">Memory Total</span><span class="kv-value">${health.memoryTotal || "N/A"}</span></div>
-        <div class="kv-row"><span class="kv-label">Node.js</span><span class="kv-value">${health.nodeVersion || "N/A"}</span></div>
-      </div>
-    </div>
-    <div class="form-card" style="margin-top:16px;">
-      <div class="section-label mono" style="margin-bottom:12px;">Platform Summary</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
-        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Devices</span><span class="kv-value">${health.deviceCount || 0}</span></div>
-        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Users</span><span class="kv-value">${health.userCount || 0}</span></div>
-        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Readings Today</span><span class="kv-value">${health.readingsToday || 0}</span></div>
-        <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Active Alerts</span><span class="kv-value">${health.activeAlerts || 0}</span></div>
-      </div>
+    <div id="system-health-content">
+      <div style="padding:40px;text-align:center;color:var(--text-muted);">Loading system health...</div>
     </div>`;
+}
+
+async function loadSystemHealthData() {
+  const el = document.getElementById("system-health-content");
+  if (!el) return;
+  try {
+    const res = await authFetch(`${API}/api/health`);
+    const health = await res.json();
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="form-card">
+          <div class="section-label mono" style="margin-bottom:12px;">Database</div>
+          <div class="kv-row"><span class="kv-label">Status</span><span class="kv-value" style="color:${health.database === "connected" ? "#27ae60" : "#E5484D"};">${health.database}</span></div>
+          <div class="kv-row"><span class="kv-label">Pool Total</span><span class="kv-value">${health.poolTotal || "N/A"}</span></div>
+          <div class="kv-row"><span class="kv-label">Pool Idle</span><span class="kv-value">${health.poolIdle || "N/A"}</span></div>
+        </div>
+        <div class="form-card">
+          <div class="section-label mono" style="margin-bottom:12px;">System</div>
+          <div class="kv-row"><span class="kv-label">Uptime</span><span class="kv-value">${health.uptime ? Math.floor(health.uptime / 3600) + "h " + Math.floor((health.uptime % 3600) / 60) + "m" : "N/A"}</span></div>
+          <div class="kv-row"><span class="kv-label">Memory Used</span><span class="kv-value">${health.memoryUsed || "N/A"}</span></div>
+          <div class="kv-row"><span class="kv-label">Memory Total</span><span class="kv-value">${health.memoryTotal || "N/A"}</span></div>
+          <div class="kv-row"><span class="kv-label">Node.js</span><span class="kv-value">${health.nodeVersion || "N/A"}</span></div>
+        </div>
+      </div>
+      <div class="form-card" style="margin-top:16px;">
+        <div class="section-label mono" style="margin-bottom:12px;">Platform Summary</div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+          <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Devices</span><span class="kv-value">${health.deviceCount || 0}</span></div>
+          <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Users</span><span class="kv-value">${health.userCount || 0}</span></div>
+          <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Readings Today</span><span class="kv-value">${health.readingsToday || 0}</span></div>
+          <div class="kv-row" style="flex-direction:column;"><span class="kv-label">Active Alerts</span><span class="kv-value">${health.activeAlerts || 0}</span></div>
+        </div>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="form-card" style="padding:24px;color:#E5484D;">Failed to load system health: ${esc(e.message)}</div>`;
+  }
 }
 
 // ---------- API Usage ----------
