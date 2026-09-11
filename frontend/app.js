@@ -1000,10 +1000,10 @@ function navigate(view) {
   const main = document.getElementById("main-content");
   if (main) main.removeAttribute("id");
   if (view === "sync") loadSyncPanel();
-  else if (view === "spc") { loadSPCData(); }
-  else if (view === "oee") { loadOEE(); }
   else if (view === "dashboard") { render(); setTimeout(initGridStack, 50); }
   else render();
+  if (view === "spc") loadSPCData();
+  if (view === "oee") loadOEE();
 }
 
 // ============================================================
